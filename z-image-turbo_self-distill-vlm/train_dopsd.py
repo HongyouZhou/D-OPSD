@@ -15,6 +15,7 @@ import tqdm
 import logging
 from pathlib import Path
 import json
+import sys
 from tqdm.auto import tqdm
 from torch.utils.data import DataLoader
 import math
@@ -27,6 +28,12 @@ from arguments import parse_args
 from utils import _encode_prompt, create_generator
 from ema_utils import *
 from vlm_utils import load_matching_state_dict,get_qwen3vl_zimage_prompt_embeds
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from efficient_fewstep.diagnostics import DopsdDiagnosticsConfig, DopsdDiagnosticsRecorder
 
 logger = get_logger(__name__)
 
@@ -60,6 +67,109 @@ def unwrap_model(model, accelerator):
     model = accelerator.unwrap_model(model)
     model = model._orig_mod if is_compiled_module(model) else model
     return model
+
+
+def parse_teacher_timestep_indices(raw_indices, num_training_steps):
+    if raw_indices is None or str(raw_indices).strip().lower() in {"", "all"}:
+        return set(range(num_training_steps))
+
+    indices = set()
+    for raw_part in str(raw_indices).split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        index = int(part)
+        if index < 0 or index >= num_training_steps:
+            raise ValueError(
+                f"teacher timestep index {index} is outside [0, {num_training_steps - 1}]"
+            )
+        indices.add(index)
+
+    if not indices:
+        raise ValueError("--teacher-timestep-indices must select at least one timestep")
+    return indices
+
+
+def default_training_timesteps(num_training_steps):
+    if num_training_steps == 4:
+        return [0, 100.0000014901161, 250, 500]
+    if num_training_steps == 8:
+        timesteps = [
+            1000.0000,
+            976.8991,
+            947.7647,
+            909.8782,
+            858.5987,
+            785.2998,
+            671.9212,
+            473.2203,
+        ]
+        return [1000 - t for t in timesteps]
+    raise NotImplementedError
+
+
+def parse_training_timesteps(raw_timesteps, num_training_steps):
+    if raw_timesteps is None or str(raw_timesteps).strip() == "":
+        return default_training_timesteps(num_training_steps)
+
+    timesteps = []
+    for raw_part in str(raw_timesteps).split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        timestep = float(part)
+        if timestep < 0 or timestep >= 1000:
+            raise ValueError(f"training timestep {timestep} is outside [0, 1000)")
+        timesteps.append(timestep)
+
+    if len(timesteps) != num_training_steps:
+        raise ValueError(
+            f"--training-timesteps has {len(timesteps)} values, "
+            f"but --num-training-steps is {num_training_steps}"
+        )
+    if any(curr <= prev for prev, curr in zip(timesteps, timesteps[1:])):
+        raise ValueError("--training-timesteps must be strictly increasing")
+    return timesteps
+
+
+def select_adaptive_teacher_timesteps(candidate_indices, scores, top_k):
+    if top_k <= 0 or top_k >= len(candidate_indices):
+        return set(candidate_indices)
+
+    def score_key(index):
+        score = scores.get(index)
+        return float("-inf") if score is None else float(score)
+
+    selected = sorted(candidate_indices, key=score_key, reverse=True)[:top_k]
+    return set(selected)
+
+
+def active_teacher_timestep_indices(args, optimizer_step, base_indices, warmup_indices, adaptive_scores):
+    if args.teacher_timestep_adaptive_top_k > 0:
+        adaptive_warmup_steps = int(args.teacher_timestep_adaptive_warmup_steps)
+        if optimizer_step <= adaptive_warmup_steps:
+            return set(base_indices)
+        return select_adaptive_teacher_timesteps(
+            sorted(base_indices),
+            adaptive_scores,
+            int(args.teacher_timestep_adaptive_top_k),
+        )
+
+    if int(args.teacher_timestep_warmup_steps) > 0 and optimizer_step <= int(args.teacher_timestep_warmup_steps):
+        return set(warmup_indices)
+    return set(base_indices)
+
+
+def update_adaptive_teacher_score(args, scores, back_step, metric_value):
+    if args.teacher_timestep_adaptive_top_k <= 0 or metric_value is None:
+        return
+    value = float(metric_value.detach().float().mean().item())
+    previous = scores.get(back_step)
+    if previous is None:
+        scores[back_step] = value
+    else:
+        ema = float(args.teacher_timestep_adaptive_ema)
+        scores[back_step] = ema * float(previous) + (1.0 - ema) * value
 
 
 
@@ -175,6 +285,11 @@ def main(args):
 
         logger = create_logger(save_dir)
         logger.info(f"Experiment directory created at {save_dir}")
+
+    diagnostics = DopsdDiagnosticsRecorder(
+        DopsdDiagnosticsConfig.from_args(args, save_dir),
+        accelerator=accelerator,
+    )
 
     if torch.backends.mps.is_available():
         accelerator.native_amp = False
@@ -406,6 +521,43 @@ def main(args):
     if accelerator.is_main_process:
         logger.info(f"Starting training experiment: {args.exp_name}")
 
+    teacher_timestep_indices = parse_teacher_timestep_indices(
+        args.teacher_timestep_indices,
+        args.num_training_steps,
+    )
+    teacher_timestep_warmup_indices = parse_teacher_timestep_indices(
+        args.teacher_timestep_warmup_indices,
+        args.num_training_steps,
+    )
+    training_timesteps = parse_training_timesteps(
+        args.training_timesteps,
+        args.num_training_steps,
+    )
+    adaptive_teacher_scores = {index: None for index in sorted(teacher_timestep_indices)}
+    if accelerator.is_main_process:
+        logger.info(
+            "Teacher timestep indices for D-OPSD loss: "
+            f"{','.join(str(index) for index in sorted(teacher_timestep_indices))}"
+        )
+        logger.info(
+            "Training timestep grid: "
+            f"{','.join(f'{timestep:g}' for timestep in training_timesteps)}"
+        )
+        if int(args.teacher_timestep_warmup_steps) > 0:
+            logger.info(
+                "Teacher timestep warmup: "
+                f"steps={args.teacher_timestep_warmup_steps} "
+                f"indices={','.join(str(index) for index in sorted(teacher_timestep_warmup_indices))}"
+            )
+        if int(args.teacher_timestep_adaptive_top_k) > 0:
+            logger.info(
+                "Adaptive teacher timestep selection: "
+                f"top_k={args.teacher_timestep_adaptive_top_k} "
+                f"warmup_steps={args.teacher_timestep_adaptive_warmup_steps} "
+                f"metric={args.teacher_timestep_adaptive_metric} "
+                f"ema={args.teacher_timestep_adaptive_ema}"
+            )
+
     progress_bar = tqdm(
         range(0, args.max_train_steps),
         initial=global_step,
@@ -480,17 +632,8 @@ def main(args):
                 h, w = images.shape[2], images.shape[3]
 
 
-                if args.num_training_steps == 4:
-                    timesteps = [0, 100.0000014901161, 250, 500]
-                elif args.num_training_steps == 8:
-                    timesteps = [1000.0000,  976.8991,  947.7647,  909.8782,  858.5987,  785.2998,
-                         671.9212,  473.2203]
-                    timesteps = [1000 - t for t in timesteps]
-                else:
-                    raise NotImplementedError
-
                 #change to list of tensor for timesteps range from (0~1) equal /1000
-                timesteps = [torch.tensor(t, device=accelerator.device, dtype=train_dtype) for t in timesteps]
+                timesteps = [torch.tensor(t, device=accelerator.device, dtype=train_dtype) for t in training_timesteps]
 
 
                 with torch.no_grad():
@@ -537,6 +680,20 @@ def main(args):
                 loss_dopsd_whole = []
                 student_x0_traj = []
                 teacher_x0_traj = []
+                optimizer_step = global_step + 1
+                active_loss_indices = active_teacher_timestep_indices(
+                    args,
+                    optimizer_step,
+                    teacher_timestep_indices,
+                    teacher_timestep_warmup_indices,
+                    adaptive_teacher_scores,
+                )
+                diagnostics_active = diagnostics.should_log_step(
+                    optimizer_step,
+                    accelerator.sync_gradients,
+                )
+                if diagnostics_active:
+                    diagnostics.begin_step()
 
                 for back_step in range(len(timesteps)):
                     t = timesteps[back_step].expand(bsz) / 1000
@@ -560,23 +717,32 @@ def main(args):
                     latents_teacher_in = latents_teacher.unsqueeze(2)
                     latents_teacher_list = list(latents_teacher_in.unbind(dim=0))
 
-                    # teacher
-                    with torch.no_grad():
-                        with accelerator.autocast():
-                            gen_model.set_adapter("teacher")
-                            v_pred_teacher = gen_model(
-                                latents_student_list,
-                                t,
-                                prompt_embeds_list_vl,
-                                return_dict=False,
-                            )[0]
-                            v_pred_teacher = torch.stack(v_pred_teacher, dim=0).squeeze(2)
+                    selected_for_loss = back_step in active_loss_indices
+                    teacher_forward_ms = None
+                    v_pred_teacher = None
+                    x_0_teacher = None
+                    if selected_for_loss:
+                        # teacher
+                        teacher_timer = diagnostics.start_timer() if diagnostics_active else None
+                        with torch.no_grad():
+                            with accelerator.autocast():
+                                gen_model.set_adapter("teacher")
+                                v_pred_teacher = gen_model(
+                                    latents_student_list,
+                                    t,
+                                    prompt_embeds_list_vl,
+                                    return_dict=False,
+                                )[0]
+                                v_pred_teacher = torch.stack(v_pred_teacher, dim=0).squeeze(2)
+                        teacher_forward_ms = diagnostics.stop_timer_ms(teacher_timer) if diagnostics_active else None
 
-                        latents_teacher_cur = latents_student
-                        x_0_teacher = latents_teacher_cur + (1 - t.reshape(bsz, 1, 1, 1)) * v_pred_teacher
-                        latents_teacher = latents_teacher_cur + v_pred_teacher * dt.reshape(bsz, 1, 1, 1)
+                        with torch.no_grad():
+                            latents_teacher_cur = latents_student
+                            x_0_teacher = latents_teacher_cur + (1 - t.reshape(bsz, 1, 1, 1)) * v_pred_teacher
+                            latents_teacher = latents_teacher_cur + v_pred_teacher * dt.reshape(bsz, 1, 1, 1)
 
                     # student
+                    student_timer = diagnostics.start_timer() if diagnostics_active else None
                     with accelerator.autocast():
                         gen_model.set_adapter("student")
                         v_pred_student = gen_model(
@@ -586,29 +752,73 @@ def main(args):
                             return_dict=False,
                         )[0]
                         v_pred_student = torch.stack(v_pred_student, dim=0).squeeze(2)
+                    student_forward_ms = diagnostics.stop_timer_ms(student_timer) if diagnostics_active else None
 
                     latents_student_cur = latents_student
                     x_0_student = latents_student_cur + (1 - t.reshape(bsz, 1, 1, 1)) * v_pred_student
                     latents_student = latents_student_cur + v_pred_student * dt.reshape(bsz, 1, 1, 1)
-                    
+
                     #  we use x_0 loss  here, which is different as shown in our paper, It can be regarded as a weighted sum of v loss and t (with a greater weight in the early steps). We found that this leads to faster convergence.
                     # legacy:
                     # loss_dopsd = F.mse_loss(
                     #     v_pred_student,v_pred_teacher.detach(), reduction="mean"
                     # )
-                    
-                    loss_dopsd =  F.mse_loss(
-                        x_0_student, x_0_teacher.detach(), reduction="mean"
-                    )
-                    total_loss = total_loss + loss_dopsd
-                    loss_dopsd_whole.append(loss_dopsd.detach())
 
-                    if accelerator.sync_gradients and ((global_step + 1) % args.sample_steps == 0):
+                    loss_dopsd = None
+                    if selected_for_loss:
+                        loss_dopsd =  F.mse_loss(
+                            x_0_student, x_0_teacher.detach(), reduction="mean"
+                        )
+                        total_loss = total_loss + loss_dopsd
+                        loss_dopsd_whole.append(loss_dopsd.detach())
+                        if args.teacher_timestep_adaptive_metric == "loss_x0":
+                            adaptive_metric_value = loss_dopsd.detach()
+                        elif args.teacher_timestep_adaptive_metric == "gap_x0_mse":
+                            adaptive_metric_value = F.mse_loss(
+                                x_0_student.detach(),
+                                x_0_teacher.detach(),
+                                reduction="mean",
+                            )
+                        elif args.teacher_timestep_adaptive_metric == "gap_v_mse":
+                            adaptive_metric_value = F.mse_loss(
+                                v_pred_student.detach(),
+                                v_pred_teacher.detach(),
+                                reduction="mean",
+                            )
+                        else:
+                            adaptive_metric_value = None
+                        update_adaptive_teacher_score(
+                            args,
+                            adaptive_teacher_scores,
+                            back_step,
+                            adaptive_metric_value,
+                        )
+
+                    if diagnostics_active:
+                        diagnostics.record_timestep(
+                            optimizer_step=optimizer_step,
+                            epoch=epoch,
+                            back_step=back_step,
+                            timestep=t.detach(),
+                            dt=dt.detach(),
+                            selected_for_loss=selected_for_loss,
+                            loss_x0=loss_dopsd.detach() if loss_dopsd is not None else None,
+                            x0_student=x_0_student.detach(),
+                            x0_teacher=x_0_teacher.detach() if x_0_teacher is not None else None,
+                            v_pred_student=v_pred_student.detach(),
+                            v_pred_teacher=v_pred_teacher.detach() if v_pred_teacher is not None else None,
+                            teacher_forward_ms=teacher_forward_ms,
+                            student_forward_ms=student_forward_ms,
+                        )
+
+                    if selected_for_loss and accelerator.sync_gradients and ((global_step + 1) % args.sample_steps == 0):
                         student_x0_traj.append(x_0_student.detach())
                         teacher_x0_traj.append(x_0_teacher.detach())
 
                 total_loss = total_loss / len(loss_dopsd_whole)
+                backward_timer = diagnostics.start_timer() if diagnostics_active else None
                 accelerator.backward(total_loss)
+                backward_ms = diagnostics.stop_timer_ms(backward_timer) if diagnostics_active else None
 
                 grad_norm = None
                 if accelerator.sync_gradients:
@@ -630,6 +840,13 @@ def main(args):
                     }
 
                     accelerator.log(logs, step=global_step)
+                    if diagnostics_active:
+                        diagnostics.finalize_step(
+                            optimizer_step=global_step,
+                            backward_ms=backward_ms,
+                            total_loss=total_loss.detach(),
+                            grad_norm=float(grad_norm) if grad_norm is not None else 0.0,
+                        )
                     ema_update_lora_adapter(
                         gen_model,
                         src_adapter="student",
@@ -745,6 +962,7 @@ def main(args):
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         logger.info("Training completed.")
+    diagnostics.close()
     accelerator.end_training()
 
 

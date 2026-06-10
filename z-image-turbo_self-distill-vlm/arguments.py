@@ -11,6 +11,11 @@ def parse_args():
     # logging:
     parser.add_argument("--output-dir", type=str, default="dopsd-exps")
     parser.add_argument("--logging-dir", type=str, default="logs")
+    parser.add_argument("--diagnostics-enable", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--diagnostics-dir", type=str, default=None)
+    parser.add_argument("--diagnostics-log-every", type=int, default=1)
+    parser.add_argument("--diagnostics-time", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--diagnostics-memory", action=argparse.BooleanOptionalAction, default=True)
 
     parser.add_argument("--exp-name", type=str, required=True)
     parser.add_argument("--sample-steps", type=int, default=2000)
@@ -25,6 +30,58 @@ def parse_args():
     parser.add_argument("--lora-rank", type=int, default=64)
     parser.add_argument("--lora-alpha", type=int, default=64)
     parser.add_argument("--num-training-steps", type=int, default=8, help="number of diffusion steps for training.")
+    parser.add_argument(
+        "--training-timesteps",
+        type=str,
+        default=None,
+        help=(
+            "Optional comma-separated timestep grid in [0, 1000). Length must match "
+            "--num-training-steps. Defaults to the upstream 4-step or 8-step grid."
+        ),
+    )
+    parser.add_argument(
+        "--teacher-timestep-indices",
+        type=str,
+        default="all",
+        help="Comma-separated zero-based timesteps that receive teacher D-OPSD loss, or 'all'.",
+    )
+    parser.add_argument(
+        "--teacher-timestep-warmup-steps",
+        type=int,
+        default=0,
+        help="Use warmup teacher timestep indices for this many optimizer steps before switching to --teacher-timestep-indices.",
+    )
+    parser.add_argument(
+        "--teacher-timestep-warmup-indices",
+        type=str,
+        default="all",
+        help="Comma-separated zero-based warmup teacher timesteps, or 'all'.",
+    )
+    parser.add_argument(
+        "--teacher-timestep-adaptive-top-k",
+        type=int,
+        default=0,
+        help="If >0, after adaptive warmup select the top-k teacher timesteps from --teacher-timestep-indices.",
+    )
+    parser.add_argument(
+        "--teacher-timestep-adaptive-warmup-steps",
+        type=int,
+        default=0,
+        help="Use all candidate teacher timesteps for this many optimizer steps before adaptive top-k selection.",
+    )
+    parser.add_argument(
+        "--teacher-timestep-adaptive-metric",
+        type=str,
+        default="loss_x0",
+        choices=["loss_x0", "gap_x0_mse", "gap_v_mse"],
+        help="EMA score used by adaptive teacher timestep selection.",
+    )
+    parser.add_argument(
+        "--teacher-timestep-adaptive-ema",
+        type=float,
+        default=0.9,
+        help="EMA decay for adaptive teacher timestep scores.",
+    )
     parser.add_argument("--ema-decay", type=float, default=0.9, help="EMA decay for teacher model.")
 
     #vae

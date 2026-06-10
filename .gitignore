@@ -1,0 +1,4 @@
+__pycache__/
+*.py[cod]
+
+z-image-turbo_self-distill-vlm/exp_results/
