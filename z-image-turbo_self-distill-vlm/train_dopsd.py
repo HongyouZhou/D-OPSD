@@ -34,6 +34,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from efficient_fewstep.diagnostics import DopsdDiagnosticsConfig, DopsdDiagnosticsRecorder
+from efficient_fewstep.targets import condition_teacher_target
 
 logger = get_logger(__name__)
 
@@ -521,6 +522,11 @@ def main(args):
     if accelerator.is_main_process:
         logger.info(f"Starting training experiment: {args.exp_name}")
 
+    if args.teacher_target_domain != "x0":
+        raise ValueError(f"F1 teacher target conditioning supports x0 domain only, got {args.teacher_target_domain}")
+    if args.teacher_target_mode == "residual_norm_cap" and args.teacher_residual_norm_cap_ratio is None:
+        raise ValueError("--teacher-residual-norm-cap-ratio is required for residual_norm_cap mode")
+
     teacher_timestep_indices = parse_teacher_timestep_indices(
         args.teacher_timestep_indices,
         args.num_training_steps,
@@ -542,6 +548,14 @@ def main(args):
         logger.info(
             "Training timestep grid: "
             f"{','.join(f'{timestep:g}' for timestep in training_timesteps)}"
+        )
+        logger.info(
+            "Teacher target conditioning: "
+            f"variant={args.teacher_target_variant} "
+            f"mode={args.teacher_target_mode} "
+            f"domain={args.teacher_target_domain} "
+            f"gamma={args.teacher_target_gamma} "
+            f"norm_cap_ratio={args.teacher_residual_norm_cap_ratio}"
         )
         if int(args.teacher_timestep_warmup_steps) > 0:
             logger.info(
@@ -765,9 +779,17 @@ def main(args):
                     # )
 
                     loss_dopsd = None
+                    teacher_target_stats = None
                     if selected_for_loss:
+                        x_0_target, teacher_target_stats = condition_teacher_target(
+                            x_0_student,
+                            x_0_teacher,
+                            mode=args.teacher_target_mode,
+                            gamma=args.teacher_target_gamma,
+                            norm_cap_ratio=args.teacher_residual_norm_cap_ratio,
+                        )
                         loss_dopsd =  F.mse_loss(
-                            x_0_student, x_0_teacher.detach(), reduction="mean"
+                            x_0_student, x_0_target, reduction="mean"
                         )
                         total_loss = total_loss + loss_dopsd
                         loss_dopsd_whole.append(loss_dopsd.detach())
@@ -809,6 +831,12 @@ def main(args):
                             v_pred_teacher=v_pred_teacher.detach() if v_pred_teacher is not None else None,
                             teacher_forward_ms=teacher_forward_ms,
                             student_forward_ms=student_forward_ms,
+                            teacher_target_variant=args.teacher_target_variant,
+                            teacher_target_mode=args.teacher_target_mode,
+                            teacher_target_domain=args.teacher_target_domain,
+                            teacher_target_gamma=args.teacher_target_gamma,
+                            teacher_residual_norm_cap_ratio=args.teacher_residual_norm_cap_ratio,
+                            teacher_target_stats=teacher_target_stats,
                         )
 
                     if selected_for_loss and accelerator.sync_gradients and ((global_step + 1) % args.sample_steps == 0):

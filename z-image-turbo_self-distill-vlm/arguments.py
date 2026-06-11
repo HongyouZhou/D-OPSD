@@ -82,6 +82,38 @@ def parse_args():
         default=0.9,
         help="EMA decay for adaptive teacher timestep scores.",
     )
+    parser.add_argument(
+        "--teacher-target-mode",
+        type=str,
+        default="raw",
+        choices=["raw", "residual_gamma", "residual_norm_cap"],
+        help="Teacher target conditioning mode for x0 matching.",
+    )
+    parser.add_argument(
+        "--teacher-target-domain",
+        type=str,
+        default="x0",
+        choices=["x0"],
+        help="Prediction domain for teacher target conditioning. F1 v1 supports x0 only.",
+    )
+    parser.add_argument(
+        "--teacher-target-gamma",
+        type=float,
+        default=1.0,
+        help="Residual strength for conditioned teacher targets.",
+    )
+    parser.add_argument(
+        "--teacher-residual-norm-cap-ratio",
+        type=float,
+        default=None,
+        help="Per-batch mean residual norm cap ratio for residual_norm_cap mode.",
+    )
+    parser.add_argument(
+        "--teacher-target-variant",
+        type=str,
+        default="raw",
+        help="Human-readable teacher target variant name for diagnostics.",
+    )
     parser.add_argument("--ema-decay", type=float, default=0.9, help="EMA decay for teacher model.")
 
     #vae
