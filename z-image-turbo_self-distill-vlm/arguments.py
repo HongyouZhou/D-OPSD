@@ -86,15 +86,22 @@ def parse_args():
         "--teacher-target-mode",
         type=str,
         default="raw",
-        choices=["raw", "residual_gamma", "residual_norm_cap"],
-        help="Teacher target conditioning mode for x0 matching.",
+        choices=[
+            "raw",
+            "residual_gamma",
+            "residual_norm_cap",
+            "raw_force075",
+            "temporal_smooth_force075",
+            "trajectory_control",
+        ],
+        help="Teacher target conditioning mode for field matching.",
     )
     parser.add_argument(
         "--teacher-target-domain",
         type=str,
         default="x0",
-        choices=["x0"],
-        help="Prediction domain for teacher target conditioning. F1 v1 supports x0 only.",
+        choices=["x0", "v"],
+        help="Prediction domain for teacher target conditioning.",
     )
     parser.add_argument(
         "--teacher-target-gamma",
@@ -107,6 +114,24 @@ def parse_args():
         type=float,
         default=None,
         help="Per-batch mean residual norm cap ratio for residual_norm_cap mode.",
+    )
+    parser.add_argument(
+        "--teacher-control-energy-lambda",
+        type=float,
+        default=0.0,
+        help="Energy penalty lambda for trajectory_control teacher targets.",
+    )
+    parser.add_argument(
+        "--teacher-control-roughness-beta",
+        type=float,
+        default=0.0,
+        help="Temporal roughness penalty beta for trajectory_control teacher targets.",
+    )
+    parser.add_argument(
+        "--teacher-control-force-budget-ratio",
+        type=float,
+        default=1.0,
+        help="Mean residual force budget ratio for trajectory_control teacher targets.",
     )
     parser.add_argument(
         "--teacher-target-variant",

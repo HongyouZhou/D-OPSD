@@ -34,7 +34,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from efficient_fewstep.diagnostics import DopsdDiagnosticsConfig, DopsdDiagnosticsRecorder
-from efficient_fewstep.targets import condition_teacher_target
+from efficient_fewstep.targets import condition_teacher_targets
 
 logger = get_logger(__name__)
 
@@ -522,10 +522,16 @@ def main(args):
     if accelerator.is_main_process:
         logger.info(f"Starting training experiment: {args.exp_name}")
 
-    if args.teacher_target_domain != "x0":
-        raise ValueError(f"F1 teacher target conditioning supports x0 domain only, got {args.teacher_target_domain}")
+    if args.teacher_target_domain not in {"x0", "v"}:
+        raise ValueError(f"F1 teacher target conditioning supports x0 and v domains, got {args.teacher_target_domain}")
     if args.teacher_target_mode == "residual_norm_cap" and args.teacher_residual_norm_cap_ratio is None:
         raise ValueError("--teacher-residual-norm-cap-ratio is required for residual_norm_cap mode")
+    if float(args.teacher_control_energy_lambda) < 0:
+        raise ValueError("--teacher-control-energy-lambda must be non-negative")
+    if float(args.teacher_control_roughness_beta) < 0:
+        raise ValueError("--teacher-control-roughness-beta must be non-negative")
+    if float(args.teacher_control_force_budget_ratio) < 0:
+        raise ValueError("--teacher-control-force-budget-ratio must be non-negative")
 
     teacher_timestep_indices = parse_teacher_timestep_indices(
         args.teacher_timestep_indices,
@@ -555,7 +561,10 @@ def main(args):
             f"mode={args.teacher_target_mode} "
             f"domain={args.teacher_target_domain} "
             f"gamma={args.teacher_target_gamma} "
-            f"norm_cap_ratio={args.teacher_residual_norm_cap_ratio}"
+            f"norm_cap_ratio={args.teacher_residual_norm_cap_ratio} "
+            f"control_energy_lambda={args.teacher_control_energy_lambda} "
+            f"control_roughness_beta={args.teacher_control_roughness_beta} "
+            f"control_force_budget_ratio={args.teacher_control_force_budget_ratio}"
         )
         if int(args.teacher_timestep_warmup_steps) > 0:
             logger.info(
@@ -692,6 +701,8 @@ def main(args):
 
                 total_loss = 0.0
                 loss_dopsd_whole = []
+                field_loss_records = []
+                diagnostic_records = []
                 student_x0_traj = []
                 teacher_x0_traj = []
                 optimizer_step = global_step + 1
@@ -772,76 +783,132 @@ def main(args):
                     x_0_student = latents_student_cur + (1 - t.reshape(bsz, 1, 1, 1)) * v_pred_student
                     latents_student = latents_student_cur + v_pred_student * dt.reshape(bsz, 1, 1, 1)
 
-                    #  we use x_0 loss  here, which is different as shown in our paper, It can be regarded as a weighted sum of v loss and t (with a greater weight in the early steps). We found that this leads to faster convergence.
-                    # legacy:
-                    # loss_dopsd = F.mse_loss(
-                    #     v_pred_student,v_pred_teacher.detach(), reduction="mean"
-                    # )
+                    # F1 redesign can match either x0 or model-output/v fields.
+                    # Targets are constructed after all selected timesteps are available
+                    # so temporal filters can operate on the ordered residual field.
 
                     loss_dopsd = None
                     teacher_target_stats = None
                     if selected_for_loss:
-                        x_0_target, teacher_target_stats = condition_teacher_target(
-                            x_0_student,
-                            x_0_teacher,
-                            mode=args.teacher_target_mode,
-                            gamma=args.teacher_target_gamma,
-                            norm_cap_ratio=args.teacher_residual_norm_cap_ratio,
-                        )
-                        loss_dopsd =  F.mse_loss(
-                            x_0_student, x_0_target, reduction="mean"
-                        )
-                        total_loss = total_loss + loss_dopsd
-                        loss_dopsd_whole.append(loss_dopsd.detach())
-                        if args.teacher_timestep_adaptive_metric == "loss_x0":
-                            adaptive_metric_value = loss_dopsd.detach()
-                        elif args.teacher_timestep_adaptive_metric == "gap_x0_mse":
-                            adaptive_metric_value = F.mse_loss(
-                                x_0_student.detach(),
-                                x_0_teacher.detach(),
-                                reduction="mean",
-                            )
-                        elif args.teacher_timestep_adaptive_metric == "gap_v_mse":
-                            adaptive_metric_value = F.mse_loss(
-                                v_pred_student.detach(),
-                                v_pred_teacher.detach(),
-                                reduction="mean",
-                            )
+                        if args.teacher_target_domain == "x0":
+                            field_student = x_0_student
+                            field_teacher = x_0_teacher
+                        elif args.teacher_target_domain == "v":
+                            field_student = v_pred_student
+                            field_teacher = v_pred_teacher
                         else:
-                            adaptive_metric_value = None
-                        update_adaptive_teacher_score(
-                            args,
-                            adaptive_teacher_scores,
-                            back_step,
-                            adaptive_metric_value,
+                            raise ValueError(f"Unknown teacher target domain: {args.teacher_target_domain}")
+                        field_loss_records.append(
+                            {
+                                "back_step": back_step,
+                                "field_student": field_student,
+                                "field_teacher": field_teacher,
+                                "x0_student": x_0_student,
+                                "x0_teacher": x_0_teacher,
+                                "v_pred_student": v_pred_student,
+                                "v_pred_teacher": v_pred_teacher,
+                            }
                         )
 
-                    if diagnostics_active:
+                    diagnostic_records.append(
+                        {
+                            "back_step": back_step,
+                            "timestep": t.detach(),
+                            "dt": dt.detach(),
+                            "selected_for_loss": selected_for_loss,
+                            "loss_dopsd": loss_dopsd,
+                            "x0_student": x_0_student.detach(),
+                            "x0_teacher": x_0_teacher.detach() if x_0_teacher is not None else None,
+                            "v_pred_student": v_pred_student.detach(),
+                            "v_pred_teacher": v_pred_teacher.detach() if v_pred_teacher is not None else None,
+                            "teacher_forward_ms": teacher_forward_ms,
+                            "student_forward_ms": student_forward_ms,
+                            "teacher_target_stats": teacher_target_stats,
+                        }
+                    )
+
+                    if selected_for_loss and accelerator.sync_gradients and ((global_step + 1) % args.sample_steps == 0):
+                        student_x0_traj.append(x_0_student.detach())
+                        teacher_x0_traj.append(x_0_teacher.detach())
+
+                if not field_loss_records:
+                    raise ValueError("No teacher timesteps were selected for D-OPSD loss")
+
+                field_targets, field_target_stats = condition_teacher_targets(
+                    [record["field_student"] for record in field_loss_records],
+                    [record["field_teacher"] for record in field_loss_records],
+                    mode=args.teacher_target_mode,
+                    gamma=args.teacher_target_gamma,
+                    norm_cap_ratio=args.teacher_residual_norm_cap_ratio,
+                    control_energy_lambda=args.teacher_control_energy_lambda,
+                    control_roughness_beta=args.teacher_control_roughness_beta,
+                    control_force_budget_ratio=args.teacher_control_force_budget_ratio,
+                )
+                loss_by_back_step = {}
+                stats_by_back_step = {}
+                for record, field_target, teacher_target_stats in zip(
+                    field_loss_records,
+                    field_targets,
+                    field_target_stats,
+                ):
+                    loss_dopsd = F.mse_loss(record["field_student"], field_target, reduction="mean")
+                    total_loss = total_loss + loss_dopsd
+                    loss_dopsd_whole.append(loss_dopsd.detach())
+                    back_step = record["back_step"]
+                    loss_by_back_step[back_step] = loss_dopsd
+                    stats_by_back_step[back_step] = teacher_target_stats
+
+                    if args.teacher_timestep_adaptive_metric == "loss_x0":
+                        adaptive_metric_value = loss_dopsd.detach()
+                    elif args.teacher_timestep_adaptive_metric == "gap_x0_mse":
+                        adaptive_metric_value = F.mse_loss(
+                            record["x0_student"].detach(),
+                            record["x0_teacher"].detach(),
+                            reduction="mean",
+                        )
+                    elif args.teacher_timestep_adaptive_metric == "gap_v_mse":
+                        adaptive_metric_value = F.mse_loss(
+                            record["v_pred_student"].detach(),
+                            record["v_pred_teacher"].detach(),
+                            reduction="mean",
+                        )
+                    else:
+                        adaptive_metric_value = None
+                    update_adaptive_teacher_score(
+                        args,
+                        adaptive_teacher_scores,
+                        back_step,
+                        adaptive_metric_value,
+                    )
+
+                if diagnostics_active:
+                    for record in diagnostic_records:
+                        back_step = record["back_step"]
+                        loss_dopsd = loss_by_back_step.get(back_step)
                         diagnostics.record_timestep(
                             optimizer_step=optimizer_step,
                             epoch=epoch,
                             back_step=back_step,
-                            timestep=t.detach(),
-                            dt=dt.detach(),
-                            selected_for_loss=selected_for_loss,
+                            timestep=record["timestep"],
+                            dt=record["dt"],
+                            selected_for_loss=record["selected_for_loss"],
                             loss_x0=loss_dopsd.detach() if loss_dopsd is not None else None,
-                            x0_student=x_0_student.detach(),
-                            x0_teacher=x_0_teacher.detach() if x_0_teacher is not None else None,
-                            v_pred_student=v_pred_student.detach(),
-                            v_pred_teacher=v_pred_teacher.detach() if v_pred_teacher is not None else None,
-                            teacher_forward_ms=teacher_forward_ms,
-                            student_forward_ms=student_forward_ms,
+                            x0_student=record["x0_student"],
+                            x0_teacher=record["x0_teacher"],
+                            v_pred_student=record["v_pred_student"],
+                            v_pred_teacher=record["v_pred_teacher"],
+                            teacher_forward_ms=record["teacher_forward_ms"],
+                            student_forward_ms=record["student_forward_ms"],
                             teacher_target_variant=args.teacher_target_variant,
                             teacher_target_mode=args.teacher_target_mode,
                             teacher_target_domain=args.teacher_target_domain,
                             teacher_target_gamma=args.teacher_target_gamma,
                             teacher_residual_norm_cap_ratio=args.teacher_residual_norm_cap_ratio,
-                            teacher_target_stats=teacher_target_stats,
+                            teacher_control_energy_lambda=args.teacher_control_energy_lambda,
+                            teacher_control_roughness_beta=args.teacher_control_roughness_beta,
+                            teacher_control_force_budget_ratio=args.teacher_control_force_budget_ratio,
+                            teacher_target_stats=stats_by_back_step.get(back_step),
                         )
-
-                    if selected_for_loss and accelerator.sync_gradients and ((global_step + 1) % args.sample_steps == 0):
-                        student_x0_traj.append(x_0_student.detach())
-                        teacher_x0_traj.append(x_0_teacher.detach())
 
                 total_loss = total_loss / len(loss_dopsd_whole)
                 backward_timer = diagnostics.start_timer() if diagnostics_active else None
