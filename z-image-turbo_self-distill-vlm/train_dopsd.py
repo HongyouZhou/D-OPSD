@@ -532,6 +532,10 @@ def main(args):
         raise ValueError("--teacher-control-roughness-beta must be non-negative")
     if float(args.teacher_control_force_budget_ratio) < 0:
         raise ValueError("--teacher-control-force-budget-ratio must be non-negative")
+    if float(args.teacher_control_trust_tau_delta) < 0:
+        raise ValueError("--teacher-control-trust-tau-delta must be non-negative")
+    if not -1.0 <= float(args.teacher_control_anchor_cosine_min) <= 1.0:
+        raise ValueError("--teacher-control-anchor-cosine-min must be in [-1, 1]")
 
     teacher_timestep_indices = parse_teacher_timestep_indices(
         args.teacher_timestep_indices,
@@ -564,7 +568,9 @@ def main(args):
             f"norm_cap_ratio={args.teacher_residual_norm_cap_ratio} "
             f"control_energy_lambda={args.teacher_control_energy_lambda} "
             f"control_roughness_beta={args.teacher_control_roughness_beta} "
-            f"control_force_budget_ratio={args.teacher_control_force_budget_ratio}"
+            f"control_force_budget_ratio={args.teacher_control_force_budget_ratio} "
+            f"trust_tau_delta={args.teacher_control_trust_tau_delta} "
+            f"anchor_cosine_min={args.teacher_control_anchor_cosine_min}"
         )
         if int(args.teacher_timestep_warmup_steps) > 0:
             logger.info(
@@ -843,6 +849,8 @@ def main(args):
                     control_energy_lambda=args.teacher_control_energy_lambda,
                     control_roughness_beta=args.teacher_control_roughness_beta,
                     control_force_budget_ratio=args.teacher_control_force_budget_ratio,
+                    control_trust_tau_delta=args.teacher_control_trust_tau_delta,
+                    control_anchor_cosine_min=args.teacher_control_anchor_cosine_min,
                 )
                 loss_by_back_step = {}
                 stats_by_back_step = {}
@@ -907,6 +915,8 @@ def main(args):
                             teacher_control_energy_lambda=args.teacher_control_energy_lambda,
                             teacher_control_roughness_beta=args.teacher_control_roughness_beta,
                             teacher_control_force_budget_ratio=args.teacher_control_force_budget_ratio,
+                            teacher_control_trust_tau_delta=args.teacher_control_trust_tau_delta,
+                            teacher_control_anchor_cosine_min=args.teacher_control_anchor_cosine_min,
                             teacher_target_stats=stats_by_back_step.get(back_step),
                         )
 

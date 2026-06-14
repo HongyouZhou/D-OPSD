@@ -88,11 +88,8 @@ def parse_args():
         default="raw",
         choices=[
             "raw",
-            "residual_gamma",
-            "residual_norm_cap",
             "raw_force075",
-            "temporal_smooth_force075",
-            "trajectory_control",
+            "trust_region_trajectory_control",
         ],
         help="Teacher target conditioning mode for field matching.",
     )
@@ -131,7 +128,19 @@ def parse_args():
         "--teacher-control-force-budget-ratio",
         type=float,
         default=1.0,
-        help="Mean residual force budget ratio for trajectory_control teacher targets.",
+        help="Mean residual force budget ratio for trust-region teacher targets.",
+    )
+    parser.add_argument(
+        "--teacher-control-trust-tau-delta",
+        type=float,
+        default=0.0,
+        help="Trust-region delta radius relative to the matched-force anchor.",
+    )
+    parser.add_argument(
+        "--teacher-control-anchor-cosine-min",
+        type=float,
+        default=-1.0,
+        help="Minimum cosine similarity between final control and matched-force anchor.",
     )
     parser.add_argument(
         "--teacher-target-variant",
