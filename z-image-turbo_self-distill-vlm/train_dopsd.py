@@ -813,6 +813,7 @@ def main(args):
                                 "x0_teacher": x_0_teacher,
                                 "v_pred_student": v_pred_student,
                                 "v_pred_teacher": v_pred_teacher,
+                                "x0_drift_factor": (1 - t).detach(),
                             }
                         )
 
@@ -851,6 +852,9 @@ def main(args):
                     control_force_budget_ratio=args.teacher_control_force_budget_ratio,
                     control_trust_tau_delta=args.teacher_control_trust_tau_delta,
                     control_anchor_cosine_min=args.teacher_control_anchor_cosine_min,
+                    control_x0_drift_factors=[
+                        record["x0_drift_factor"] for record in field_loss_records
+                    ],
                 )
                 loss_by_back_step = {}
                 stats_by_back_step = {}

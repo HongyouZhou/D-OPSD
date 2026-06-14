@@ -90,6 +90,7 @@ def parse_args():
             "raw",
             "raw_force075",
             "trust_region_trajectory_control",
+            "x0_drift_trust_region_trajectory_control",
         ],
         help="Teacher target conditioning mode for field matching.",
     )
