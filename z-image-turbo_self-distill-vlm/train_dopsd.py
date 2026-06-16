@@ -34,7 +34,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from efficient_fewstep.diagnostics import DopsdDiagnosticsConfig, DopsdDiagnosticsRecorder
-from efficient_fewstep.targets import ResidualEmaCache, VCEMA_RESIDUAL_MODE, condition_teacher_targets
+from efficient_fewstep.targets import F3A_MODE, ResidualEmaCache, VCEMA_RESIDUAL_MODE, condition_teacher_targets
 
 logger = get_logger(__name__)
 
@@ -545,6 +545,25 @@ def main(args):
             raise ValueError("variance_controlled_residual_ema is fixed to teacher_target_domain=v for F2-A")
         if accelerator.num_processes != 1:
             raise ValueError("variance_controlled_residual_ema uses a process-local cache and requires num_processes=1")
+    if args.teacher_target_mode == F3A_MODE:
+        if args.teacher_target_domain != "v":
+            raise ValueError("energy_regularized_mode_seeking is fixed to teacher_target_domain=v for F3-A")
+        if float(args.teacher_control_force_budget_ratio) != 1.0:
+            raise ValueError("F3-A requires teacher_control_force_budget_ratio=1.0; 0.75 is readout-only")
+        if float(args.teacher_mode_eta) < 0:
+            raise ValueError("--teacher-mode-eta must be non-negative")
+        if float(args.teacher_energy_ratio_min_vs_raw) < 0:
+            raise ValueError("--teacher-energy-ratio-min-vs-raw must be non-negative")
+        if float(args.teacher_energy_ratio_max_vs_raw) < float(args.teacher_energy_ratio_min_vs_raw):
+            raise ValueError("--teacher-energy-ratio-max-vs-raw must be >= --teacher-energy-ratio-min-vs-raw")
+        if int(args.teacher_mode_min_batch) < 1:
+            raise ValueError("--teacher-mode-min-batch must be at least 1")
+        if not -1.0 <= float(args.teacher_mode_cosine_floor) <= 1.0:
+            raise ValueError("--teacher-mode-cosine-floor must be in [-1, 1]")
+        if float(args.teacher_matched_force_reference_ratio) <= 0:
+            raise ValueError("--teacher-matched-force-reference-ratio must be positive")
+        if float(args.teacher_mode_residual_norm_eps) <= 0:
+            raise ValueError("--teacher-mode-residual-norm-eps must be positive")
 
     teacher_timestep_indices = parse_teacher_timestep_indices(
         args.teacher_timestep_indices,
@@ -582,6 +601,12 @@ def main(args):
             f"anchor_cosine_min={args.teacher_control_anchor_cosine_min} "
             f"residual_ema_decay={args.teacher_residual_ema_decay} "
             f"residual_innovation_mix={args.teacher_residual_innovation_mix} "
+            f"mode_eta={args.teacher_mode_eta} "
+            f"energy_ratio_min_vs_raw={args.teacher_energy_ratio_min_vs_raw} "
+            f"energy_ratio_max_vs_raw={args.teacher_energy_ratio_max_vs_raw} "
+            f"mode_min_batch={args.teacher_mode_min_batch} "
+            f"mode_cosine_floor={args.teacher_mode_cosine_floor} "
+            f"matched_force_reference_ratio={args.teacher_matched_force_reference_ratio} "
             f"cache_case_id={args.teacher_cache_case_id or args.exp_name}"
         )
         if int(args.teacher_timestep_warmup_steps) > 0:
@@ -872,6 +897,13 @@ def main(args):
                     residual_ema_cache=residual_ema_cache,
                     residual_ema_decay=args.teacher_residual_ema_decay,
                     residual_innovation_mix=args.teacher_residual_innovation_mix,
+                    f3a_eta_mode=args.teacher_mode_eta,
+                    f3a_energy_ratio_min_vs_raw=args.teacher_energy_ratio_min_vs_raw,
+                    f3a_energy_ratio_max_vs_raw=args.teacher_energy_ratio_max_vs_raw,
+                    f3a_min_mode_batch=args.teacher_mode_min_batch,
+                    f3a_mode_cosine_floor=args.teacher_mode_cosine_floor,
+                    f3a_matched_force_reference_ratio=args.teacher_matched_force_reference_ratio,
+                    f3a_residual_norm_eps=args.teacher_mode_residual_norm_eps,
                     cache_case_id=args.teacher_cache_case_id or args.exp_name,
                     cache_source_row_ids=batch.get("source_row_ids"),
                     cache_timestep_indices=[

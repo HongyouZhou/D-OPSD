@@ -92,6 +92,7 @@ def parse_args():
             "trust_region_trajectory_control",
             "x0_drift_trust_region_trajectory_control",
             "variance_controlled_residual_ema",
+            "energy_regularized_mode_seeking",
         ],
         help="Teacher target conditioning mode for field matching.",
     )
@@ -162,6 +163,13 @@ def parse_args():
         default=None,
         help="Stable case id used in variance_controlled_residual_ema cache keys.",
     )
+    parser.add_argument("--teacher-mode-eta", type=float, default=0.25)
+    parser.add_argument("--teacher-energy-ratio-min-vs-raw", type=float, default=0.90)
+    parser.add_argument("--teacher-energy-ratio-max-vs-raw", type=float, default=1.25)
+    parser.add_argument("--teacher-mode-min-batch", type=int, default=2)
+    parser.add_argument("--teacher-mode-cosine-floor", type=float, default=0.0)
+    parser.add_argument("--teacher-matched-force-reference-ratio", type=float, default=0.75)
+    parser.add_argument("--teacher-mode-residual-norm-eps", type=float, default=1e-6)
     parser.add_argument(
         "--teacher-target-variant",
         type=str,
