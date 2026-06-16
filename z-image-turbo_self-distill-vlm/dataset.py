@@ -118,7 +118,9 @@ class TextImageDataset(Dataset):
         return {
             "pixel_values": pixel_values,
             "prompt": str(item.get(prompt_key, "")),
-            "prompt_type": prompt_key
+            "prompt_type": prompt_key,
+            "source_row_id": str(item.get("_id") or item.get("id") or idx),
+            "source_image_path": str(img_path),
         }
 
 
@@ -179,10 +181,14 @@ def collate_fn(examples):
     pixel_values = torch.stack([example["pixel_values"] for example in examples])
     prompts = [example["prompt"] for example in examples]
     prompt_types = [example["prompt_type"] for example in examples]
+    source_row_ids = [example["source_row_id"] for example in examples]
+    source_image_paths = [example["source_image_path"] for example in examples]
     return {
         "pixel_values": pixel_values,
         "prompts": prompts,
-        "prompt_types": prompt_types
+        "prompt_types": prompt_types,
+        "source_row_ids": source_row_ids,
+        "source_image_paths": source_image_paths,
     }
 
 

@@ -34,7 +34,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from efficient_fewstep.diagnostics import DopsdDiagnosticsConfig, DopsdDiagnosticsRecorder
-from efficient_fewstep.targets import condition_teacher_targets
+from efficient_fewstep.targets import ResidualEmaCache, VCEMA_RESIDUAL_MODE, condition_teacher_targets
 
 logger = get_logger(__name__)
 
@@ -536,6 +536,15 @@ def main(args):
         raise ValueError("--teacher-control-trust-tau-delta must be non-negative")
     if not -1.0 <= float(args.teacher_control_anchor_cosine_min) <= 1.0:
         raise ValueError("--teacher-control-anchor-cosine-min must be in [-1, 1]")
+    if not 0.0 <= float(args.teacher_residual_ema_decay) < 1.0:
+        raise ValueError("--teacher-residual-ema-decay must be in [0, 1)")
+    if not 0.0 <= float(args.teacher_residual_innovation_mix) <= 1.0:
+        raise ValueError("--teacher-residual-innovation-mix must be in [0, 1]")
+    if args.teacher_target_mode == VCEMA_RESIDUAL_MODE:
+        if args.teacher_target_domain != "v":
+            raise ValueError("variance_controlled_residual_ema is fixed to teacher_target_domain=v for F2-A")
+        if accelerator.num_processes != 1:
+            raise ValueError("variance_controlled_residual_ema uses a process-local cache and requires num_processes=1")
 
     teacher_timestep_indices = parse_teacher_timestep_indices(
         args.teacher_timestep_indices,
@@ -570,7 +579,10 @@ def main(args):
             f"control_roughness_beta={args.teacher_control_roughness_beta} "
             f"control_force_budget_ratio={args.teacher_control_force_budget_ratio} "
             f"trust_tau_delta={args.teacher_control_trust_tau_delta} "
-            f"anchor_cosine_min={args.teacher_control_anchor_cosine_min}"
+            f"anchor_cosine_min={args.teacher_control_anchor_cosine_min} "
+            f"residual_ema_decay={args.teacher_residual_ema_decay} "
+            f"residual_innovation_mix={args.teacher_residual_innovation_mix} "
+            f"cache_case_id={args.teacher_cache_case_id or args.exp_name}"
         )
         if int(args.teacher_timestep_warmup_steps) > 0:
             logger.info(
@@ -586,6 +598,8 @@ def main(args):
                 f"metric={args.teacher_timestep_adaptive_metric} "
                 f"ema={args.teacher_timestep_adaptive_ema}"
             )
+
+    residual_ema_cache = ResidualEmaCache() if args.teacher_target_mode == VCEMA_RESIDUAL_MODE else None
 
     progress_bar = tqdm(
         range(0, args.max_train_steps),
@@ -854,6 +868,14 @@ def main(args):
                     control_anchor_cosine_min=args.teacher_control_anchor_cosine_min,
                     control_x0_drift_factors=[
                         record["x0_drift_factor"] for record in field_loss_records
+                    ],
+                    residual_ema_cache=residual_ema_cache,
+                    residual_ema_decay=args.teacher_residual_ema_decay,
+                    residual_innovation_mix=args.teacher_residual_innovation_mix,
+                    cache_case_id=args.teacher_cache_case_id or args.exp_name,
+                    cache_source_row_ids=batch.get("source_row_ids"),
+                    cache_timestep_indices=[
+                        int(record["back_step"]) for record in field_loss_records
                     ],
                 )
                 loss_by_back_step = {}

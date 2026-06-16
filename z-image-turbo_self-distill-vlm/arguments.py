@@ -91,6 +91,7 @@ def parse_args():
             "raw_force075",
             "trust_region_trajectory_control",
             "x0_drift_trust_region_trajectory_control",
+            "variance_controlled_residual_ema",
         ],
         help="Teacher target conditioning mode for field matching.",
     )
@@ -142,6 +143,24 @@ def parse_args():
         type=float,
         default=-1.0,
         help="Minimum cosine similarity between final control and matched-force anchor.",
+    )
+    parser.add_argument(
+        "--teacher-residual-ema-decay",
+        type=float,
+        default=0.9,
+        help="Detached residual cache EMA decay for variance_controlled_residual_ema targets.",
+    )
+    parser.add_argument(
+        "--teacher-residual-innovation-mix",
+        type=float,
+        default=0.5,
+        help="Current residual innovation mix for variance_controlled_residual_ema targets.",
+    )
+    parser.add_argument(
+        "--teacher-cache-case-id",
+        type=str,
+        default=None,
+        help="Stable case id used in variance_controlled_residual_ema cache keys.",
     )
     parser.add_argument(
         "--teacher-target-variant",
