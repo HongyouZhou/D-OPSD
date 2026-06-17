@@ -34,7 +34,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from efficient_fewstep.diagnostics import DopsdDiagnosticsConfig, DopsdDiagnosticsRecorder
-from efficient_fewstep.targets import F3A_MODE, ResidualEmaCache, VCEMA_RESIDUAL_MODE, condition_teacher_targets
+from efficient_fewstep.targets import (
+    F3A_MODE,
+    F3B_MODE,
+    F3BResidualBank,
+    ResidualEmaCache,
+    VCEMA_RESIDUAL_MODE,
+    condition_teacher_targets,
+)
 
 logger = get_logger(__name__)
 
@@ -564,6 +571,29 @@ def main(args):
             raise ValueError("--teacher-matched-force-reference-ratio must be positive")
         if float(args.teacher_mode_residual_norm_eps) <= 0:
             raise ValueError("--teacher-mode-residual-norm-eps must be positive")
+    if args.teacher_target_mode == F3B_MODE:
+        if args.teacher_target_domain != "v":
+            raise ValueError("safe_angle_temporal_consensus is fixed to teacher_target_domain=v for F3-B")
+        if accelerator.num_processes != 1:
+            raise ValueError("safe_angle_temporal_consensus uses a process-local bank and requires num_processes=1")
+        if float(args.teacher_f3b_eta_mode) < 0:
+            raise ValueError("--teacher-f3b-eta-mode must be non-negative")
+        if not -1.0 <= float(args.teacher_f3b_raw_cosine_min) <= 1.0:
+            raise ValueError("--teacher-f3b-raw-cosine-min must be in [-1, 1]")
+        if float(args.teacher_f3b_temporal_smooth_lambda) < 0:
+            raise ValueError("--teacher-f3b-temporal-smooth-lambda must be non-negative")
+        if float(args.teacher_f3b_energy_ratio_max_vs_raw) < 0:
+            raise ValueError("--teacher-f3b-energy-ratio-max-vs-raw must be non-negative")
+        if int(args.teacher_f3b_bank_size_per_timestep) < 1:
+            raise ValueError("--teacher-f3b-bank-size-per-timestep must be at least 1")
+        if int(args.teacher_f3b_min_consensus_samples) < 1:
+            raise ValueError("--teacher-f3b-min-consensus-samples must be at least 1")
+        if not -1.0 <= float(args.teacher_f3b_bank_cosine_floor) <= 1.0:
+            raise ValueError("--teacher-f3b-bank-cosine-floor must be in [-1, 1]")
+        if float(args.teacher_f3b_matched_force_reference_ratio) <= 0:
+            raise ValueError("--teacher-f3b-matched-force-reference-ratio must be positive")
+        if float(args.teacher_f3b_residual_norm_eps) <= 0:
+            raise ValueError("--teacher-f3b-residual-norm-eps must be positive")
 
     teacher_timestep_indices = parse_teacher_timestep_indices(
         args.teacher_timestep_indices,
@@ -607,6 +637,13 @@ def main(args):
             f"mode_min_batch={args.teacher_mode_min_batch} "
             f"mode_cosine_floor={args.teacher_mode_cosine_floor} "
             f"matched_force_reference_ratio={args.teacher_matched_force_reference_ratio} "
+            f"f3b_eta_mode={args.teacher_f3b_eta_mode} "
+            f"f3b_raw_cosine_min={args.teacher_f3b_raw_cosine_min} "
+            f"f3b_temporal_smooth_lambda={args.teacher_f3b_temporal_smooth_lambda} "
+            f"f3b_energy_ratio_max_vs_raw={args.teacher_f3b_energy_ratio_max_vs_raw} "
+            f"f3b_bank_size_per_timestep={args.teacher_f3b_bank_size_per_timestep} "
+            f"f3b_min_consensus_samples={args.teacher_f3b_min_consensus_samples} "
+            f"f3b_bank_cosine_floor={args.teacher_f3b_bank_cosine_floor} "
             f"cache_case_id={args.teacher_cache_case_id or args.exp_name}"
         )
         if int(args.teacher_timestep_warmup_steps) > 0:
@@ -625,6 +662,11 @@ def main(args):
             )
 
     residual_ema_cache = ResidualEmaCache() if args.teacher_target_mode == VCEMA_RESIDUAL_MODE else None
+    residual_consensus_bank = (
+        F3BResidualBank(max_records_per_key=args.teacher_f3b_bank_size_per_timestep)
+        if args.teacher_target_mode == F3B_MODE
+        else None
+    )
 
     progress_bar = tqdm(
         range(0, args.max_train_steps),
@@ -904,11 +946,21 @@ def main(args):
                     f3a_mode_cosine_floor=args.teacher_mode_cosine_floor,
                     f3a_matched_force_reference_ratio=args.teacher_matched_force_reference_ratio,
                     f3a_residual_norm_eps=args.teacher_mode_residual_norm_eps,
+                    f3b_eta_mode=args.teacher_f3b_eta_mode,
+                    f3b_raw_cosine_min=args.teacher_f3b_raw_cosine_min,
+                    f3b_temporal_smooth_lambda=args.teacher_f3b_temporal_smooth_lambda,
+                    f3b_energy_ratio_max_vs_raw=args.teacher_f3b_energy_ratio_max_vs_raw,
+                    f3b_bank_size_per_timestep=args.teacher_f3b_bank_size_per_timestep,
+                    f3b_min_consensus_samples=args.teacher_f3b_min_consensus_samples,
+                    f3b_bank_cosine_floor=args.teacher_f3b_bank_cosine_floor,
+                    f3b_matched_force_reference_ratio=args.teacher_f3b_matched_force_reference_ratio,
+                    f3b_residual_norm_eps=args.teacher_f3b_residual_norm_eps,
                     cache_case_id=args.teacher_cache_case_id or args.exp_name,
                     cache_source_row_ids=batch.get("source_row_ids"),
                     cache_timestep_indices=[
                         int(record["back_step"]) for record in field_loss_records
                     ],
+                    residual_consensus_bank=residual_consensus_bank,
                 )
                 loss_by_back_step = {}
                 stats_by_back_step = {}

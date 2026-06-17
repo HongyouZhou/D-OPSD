@@ -93,6 +93,7 @@ def parse_args():
             "x0_drift_trust_region_trajectory_control",
             "variance_controlled_residual_ema",
             "energy_regularized_mode_seeking",
+            "safe_angle_temporal_consensus",
         ],
         help="Teacher target conditioning mode for field matching.",
     )
@@ -170,6 +171,15 @@ def parse_args():
     parser.add_argument("--teacher-mode-cosine-floor", type=float, default=0.0)
     parser.add_argument("--teacher-matched-force-reference-ratio", type=float, default=0.75)
     parser.add_argument("--teacher-mode-residual-norm-eps", type=float, default=1e-6)
+    parser.add_argument("--teacher-f3b-eta-mode", type=float, default=0.25)
+    parser.add_argument("--teacher-f3b-raw-cosine-min", type=float, default=0.90)
+    parser.add_argument("--teacher-f3b-temporal-smooth-lambda", type=float, default=1.0)
+    parser.add_argument("--teacher-f3b-energy-ratio-max-vs-raw", type=float, default=1.0)
+    parser.add_argument("--teacher-f3b-bank-size-per-timestep", type=int, default=8)
+    parser.add_argument("--teacher-f3b-min-consensus-samples", type=int, default=3)
+    parser.add_argument("--teacher-f3b-bank-cosine-floor", type=float, default=0.0)
+    parser.add_argument("--teacher-f3b-matched-force-reference-ratio", type=float, default=0.75)
+    parser.add_argument("--teacher-f3b-residual-norm-eps", type=float, default=1e-6)
     parser.add_argument(
         "--teacher-target-variant",
         type=str,
