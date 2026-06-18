@@ -181,6 +181,13 @@ def parse_args():
     parser.add_argument("--teacher-f3b-matched-force-reference-ratio", type=float, default=0.75)
     parser.add_argument("--teacher-f3b-residual-norm-eps", type=float, default=1e-6)
     parser.add_argument(
+        "--teacher-f3b-consensus-estimator",
+        type=str,
+        default="mean",
+        choices=["mean", "top_agreement_trimmed"],
+        help="Consensus estimator for safe_angle_temporal_consensus targets.",
+    )
+    parser.add_argument(
         "--teacher-target-variant",
         type=str,
         default="raw",

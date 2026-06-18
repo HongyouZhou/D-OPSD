@@ -594,6 +594,10 @@ def main(args):
             raise ValueError("--teacher-f3b-matched-force-reference-ratio must be positive")
         if float(args.teacher_f3b_residual_norm_eps) <= 0:
             raise ValueError("--teacher-f3b-residual-norm-eps must be positive")
+        if str(args.teacher_f3b_consensus_estimator) not in {"mean", "top_agreement_trimmed"}:
+            raise ValueError(
+                "--teacher-f3b-consensus-estimator must be mean or top_agreement_trimmed"
+            )
 
     teacher_timestep_indices = parse_teacher_timestep_indices(
         args.teacher_timestep_indices,
@@ -644,6 +648,7 @@ def main(args):
             f"f3b_bank_size_per_timestep={args.teacher_f3b_bank_size_per_timestep} "
             f"f3b_min_consensus_samples={args.teacher_f3b_min_consensus_samples} "
             f"f3b_bank_cosine_floor={args.teacher_f3b_bank_cosine_floor} "
+            f"f3b_consensus_estimator={args.teacher_f3b_consensus_estimator} "
             f"cache_case_id={args.teacher_cache_case_id or args.exp_name}"
         )
         if int(args.teacher_timestep_warmup_steps) > 0:
@@ -955,6 +960,7 @@ def main(args):
                     f3b_bank_cosine_floor=args.teacher_f3b_bank_cosine_floor,
                     f3b_matched_force_reference_ratio=args.teacher_f3b_matched_force_reference_ratio,
                     f3b_residual_norm_eps=args.teacher_f3b_residual_norm_eps,
+                    f3b_consensus_estimator=args.teacher_f3b_consensus_estimator,
                     cache_case_id=args.teacher_cache_case_id or args.exp_name,
                     cache_source_row_ids=batch.get("source_row_ids"),
                     cache_timestep_indices=[
