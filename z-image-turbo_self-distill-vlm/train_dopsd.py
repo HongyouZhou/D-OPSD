@@ -598,6 +598,20 @@ def main(args):
             raise ValueError(
                 "--teacher-f3b-consensus-estimator must be mean or top_agreement_trimmed"
             )
+        active_back_steps = str(args.teacher_f3b_consensus_active_back_steps).strip().lower()
+        if active_back_steps not in {"", "all"}:
+            try:
+                parsed_active_back_steps = [
+                    int(part.strip()) for part in active_back_steps.split(",") if part.strip()
+                ]
+            except ValueError as exc:
+                raise ValueError(
+                    "--teacher-f3b-consensus-active-back-steps must be 'all' or comma-separated integers"
+                ) from exc
+            if not parsed_active_back_steps or any(step < 0 for step in parsed_active_back_steps):
+                raise ValueError(
+                    "--teacher-f3b-consensus-active-back-steps must be 'all' or non-negative integers"
+                )
 
     teacher_timestep_indices = parse_teacher_timestep_indices(
         args.teacher_timestep_indices,
@@ -649,6 +663,7 @@ def main(args):
             f"f3b_min_consensus_samples={args.teacher_f3b_min_consensus_samples} "
             f"f3b_bank_cosine_floor={args.teacher_f3b_bank_cosine_floor} "
             f"f3b_consensus_estimator={args.teacher_f3b_consensus_estimator} "
+            f"f3b_consensus_active_back_steps={args.teacher_f3b_consensus_active_back_steps} "
             f"cache_case_id={args.teacher_cache_case_id or args.exp_name}"
         )
         if int(args.teacher_timestep_warmup_steps) > 0:
@@ -961,6 +976,7 @@ def main(args):
                     f3b_matched_force_reference_ratio=args.teacher_f3b_matched_force_reference_ratio,
                     f3b_residual_norm_eps=args.teacher_f3b_residual_norm_eps,
                     f3b_consensus_estimator=args.teacher_f3b_consensus_estimator,
+                    f3b_consensus_active_back_steps=args.teacher_f3b_consensus_active_back_steps,
                     cache_case_id=args.teacher_cache_case_id or args.exp_name,
                     cache_source_row_ids=batch.get("source_row_ids"),
                     cache_timestep_indices=[

@@ -188,6 +188,12 @@ def parse_args():
         help="Consensus estimator for safe_angle_temporal_consensus targets.",
     )
     parser.add_argument(
+        "--teacher-f3b-consensus-active-back-steps",
+        type=str,
+        default="all",
+        help="Comma-separated back_step ids where F3-B consensus is active, or 'all'.",
+    )
+    parser.add_argument(
         "--teacher-target-variant",
         type=str,
         default="raw",
