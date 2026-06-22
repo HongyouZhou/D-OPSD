@@ -29,6 +29,12 @@ def parse_args():
     parser.add_argument("--use-lora",type=float, default=1, help="use if > 1")
     parser.add_argument("--lora-rank", type=int, default=64)
     parser.add_argument("--lora-alpha", type=int, default=64)
+    parser.add_argument(
+        "--teacher-vlm-model-path",
+        type=str,
+        default="Qwen/Qwen3-VL-4B-Instruct",
+        help="Qwen3-VL model used by the D-OPSD multimodal teacher during training.",
+    )
     parser.add_argument("--num-training-steps", type=int, default=8, help="number of diffusion steps for training.")
     parser.add_argument(
         "--training-timesteps",

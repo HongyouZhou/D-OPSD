@@ -328,7 +328,7 @@ def main(args):
 
 
     # get vlm encoder
-    vl_model_name = "Qwen/Qwen3-VL-4B-Instruct"
+    vl_model_name = args.teacher_vlm_model_path
     min_pixels = 512 * 512
     max_pixels = 768 * 768
     from transformers import AutoProcessor, AutoModelForImageTextToText
@@ -345,7 +345,7 @@ def main(args):
     vl_model.to(accelerator.device, dtype=inference_dtype)
 
     if accelerator.is_main_process:
-        logger.info(f"VLM loaded, dtype: {vl_model.parameters().__next__().dtype}")
+        logger.info(f"Teacher VLM loaded: {vl_model_name}, dtype: {vl_model.parameters().__next__().dtype}")
 
 
 
