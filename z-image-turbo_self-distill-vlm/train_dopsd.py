@@ -38,6 +38,8 @@ from efficient_fewstep.targets import (
     F3A_MODE,
     F3B_MODE,
     F3BResidualBank,
+    PC1_MODE,
+    PC1_SOURCE_RESOLVER_BASE_TEXT,
     ResidualEmaCache,
     VCEMA_RESIDUAL_MODE,
     condition_teacher_targets,
@@ -612,6 +614,15 @@ def main(args):
                 raise ValueError(
                     "--teacher-f3b-consensus-active-back-steps must be 'all' or non-negative integers"
                 )
+    if args.teacher_target_mode == PC1_MODE:
+        if args.teacher_target_domain != "v":
+            raise ValueError("paired_lowenergy_control is fixed to teacher_target_domain=v for PC1-A")
+        if str(args.teacher_pc1_source_resolver) != PC1_SOURCE_RESOLVER_BASE_TEXT:
+            raise ValueError(
+                f"unsupported --teacher-pc1-source-resolver: {args.teacher_pc1_source_resolver}"
+            )
+        if str(args.teacher_pc1_b_operator) != "identity_v_domain":
+            raise ValueError(f"unsupported --teacher-pc1-b-operator: {args.teacher_pc1_b_operator}")
 
     teacher_timestep_indices = parse_teacher_timestep_indices(
         args.teacher_timestep_indices,
@@ -664,6 +675,8 @@ def main(args):
             f"f3b_bank_cosine_floor={args.teacher_f3b_bank_cosine_floor} "
             f"f3b_consensus_estimator={args.teacher_f3b_consensus_estimator} "
             f"f3b_consensus_active_back_steps={args.teacher_f3b_consensus_active_back_steps} "
+            f"pc1_source_resolver={args.teacher_pc1_source_resolver} "
+            f"pc1_b_operator={args.teacher_pc1_b_operator} "
             f"cache_case_id={args.teacher_cache_case_id or args.exp_name}"
         )
         if int(args.teacher_timestep_warmup_steps) > 0:
@@ -851,8 +864,11 @@ def main(args):
 
                     selected_for_loss = back_step in active_loss_indices
                     teacher_forward_ms = None
+                    source_forward_ms = None
                     v_pred_teacher = None
+                    v_pred_source = None
                     x_0_teacher = None
+                    x_0_source = None
                     if selected_for_loss:
                         # teacher
                         teacher_timer = diagnostics.start_timer() if diagnostics_active else None
@@ -872,6 +888,27 @@ def main(args):
                             latents_teacher_cur = latents_student
                             x_0_teacher = latents_teacher_cur + (1 - t.reshape(bsz, 1, 1, 1)) * v_pred_teacher
                             latents_teacher = latents_teacher_cur + v_pred_teacher * dt.reshape(bsz, 1, 1, 1)
+
+                        if args.teacher_target_mode == PC1_MODE:
+                            source_timer = diagnostics.start_timer() if diagnostics_active else None
+                            with torch.no_grad():
+                                with accelerator.autocast():
+                                    if str(args.teacher_pc1_source_resolver) != PC1_SOURCE_RESOLVER_BASE_TEXT:
+                                        raise ValueError(
+                                            f"unsupported PC1 source resolver: {args.teacher_pc1_source_resolver}"
+                                        )
+                                    with gen_model.disable_adapter():
+                                        v_pred_source = gen_model(
+                                            latents_student_list,
+                                            t,
+                                            prompt_embeds_list,
+                                            return_dict=False,
+                                        )[0]
+                                    v_pred_source = torch.stack(v_pred_source, dim=0).squeeze(2)
+                            source_forward_ms = diagnostics.stop_timer_ms(source_timer) if diagnostics_active else None
+
+                            with torch.no_grad():
+                                x_0_source = latents_student + (1 - t.reshape(bsz, 1, 1, 1)) * v_pred_source
 
                     # student
                     student_timer = diagnostics.start_timer() if diagnostics_active else None
@@ -900,9 +937,11 @@ def main(args):
                         if args.teacher_target_domain == "x0":
                             field_student = x_0_student
                             field_teacher = x_0_teacher
+                            field_source = x_0_source
                         elif args.teacher_target_domain == "v":
                             field_student = v_pred_student
                             field_teacher = v_pred_teacher
+                            field_source = v_pred_source
                         else:
                             raise ValueError(f"Unknown teacher target domain: {args.teacher_target_domain}")
                         field_loss_records.append(
@@ -910,10 +949,13 @@ def main(args):
                                 "back_step": back_step,
                                 "field_student": field_student,
                                 "field_teacher": field_teacher,
+                                "field_source": field_source,
                                 "x0_student": x_0_student,
                                 "x0_teacher": x_0_teacher,
+                                "x0_source": x_0_source,
                                 "v_pred_student": v_pred_student,
                                 "v_pred_teacher": v_pred_teacher,
+                                "v_pred_source": v_pred_source,
                                 "x0_drift_factor": (1 - t).detach(),
                             }
                         )
@@ -929,7 +971,9 @@ def main(args):
                             "x0_teacher": x_0_teacher.detach() if x_0_teacher is not None else None,
                             "v_pred_student": v_pred_student.detach(),
                             "v_pred_teacher": v_pred_teacher.detach() if v_pred_teacher is not None else None,
+                            "v_pred_source": v_pred_source.detach() if v_pred_source is not None else None,
                             "teacher_forward_ms": teacher_forward_ms,
+                            "source_forward_ms": source_forward_ms,
                             "student_forward_ms": student_forward_ms,
                             "teacher_target_stats": teacher_target_stats,
                         }
@@ -945,6 +989,9 @@ def main(args):
                 field_targets, field_target_stats = condition_teacher_targets(
                     [record["field_student"] for record in field_loss_records],
                     [record["field_teacher"] for record in field_loss_records],
+                    y_sources=[
+                        record["field_source"] for record in field_loss_records
+                    ] if args.teacher_target_mode == PC1_MODE else None,
                     mode=args.teacher_target_mode,
                     gamma=args.teacher_target_gamma,
                     norm_cap_ratio=args.teacher_residual_norm_cap_ratio,
@@ -959,6 +1006,8 @@ def main(args):
                     residual_ema_cache=residual_ema_cache,
                     residual_ema_decay=args.teacher_residual_ema_decay,
                     residual_innovation_mix=args.teacher_residual_innovation_mix,
+                    pc1_source_resolver=args.teacher_pc1_source_resolver,
+                    pc1_b_operator=args.teacher_pc1_b_operator,
                     f3a_eta_mode=args.teacher_mode_eta,
                     f3a_energy_ratio_min_vs_raw=args.teacher_energy_ratio_min_vs_raw,
                     f3a_energy_ratio_max_vs_raw=args.teacher_energy_ratio_max_vs_raw,
@@ -1038,6 +1087,7 @@ def main(args):
                             v_pred_student=record["v_pred_student"],
                             v_pred_teacher=record["v_pred_teacher"],
                             teacher_forward_ms=record["teacher_forward_ms"],
+                            source_forward_ms=record["source_forward_ms"],
                             student_forward_ms=record["student_forward_ms"],
                             teacher_target_variant=args.teacher_target_variant,
                             teacher_target_mode=args.teacher_target_mode,

@@ -100,6 +100,7 @@ def parse_args():
             "variance_controlled_residual_ema",
             "energy_regularized_mode_seeking",
             "safe_angle_temporal_consensus",
+            "paired_lowenergy_control",
         ],
         help="Teacher target conditioning mode for field matching.",
     )
@@ -204,6 +205,20 @@ def parse_args():
         type=str,
         default="raw",
         help="Human-readable teacher target variant name for diagnostics.",
+    )
+    parser.add_argument(
+        "--teacher-pc1-source-resolver",
+        type=str,
+        default="base_text_disabled_adapter",
+        choices=["base_text_disabled_adapter"],
+        help="Source/base field resolver for paired_lowenergy_control.",
+    )
+    parser.add_argument(
+        "--teacher-pc1-b-operator",
+        type=str,
+        default="identity_v_domain",
+        choices=["identity_v_domain"],
+        help="Observable-field mapping B_t for paired_lowenergy_control.",
     )
     parser.add_argument("--ema-decay", type=float, default=0.9, help="EMA decay for teacher model.")
 
