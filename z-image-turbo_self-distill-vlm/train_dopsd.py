@@ -1008,6 +1008,8 @@ def main(args):
                     residual_innovation_mix=args.teacher_residual_innovation_mix,
                     pc1_source_resolver=args.teacher_pc1_source_resolver,
                     pc1_b_operator=args.teacher_pc1_b_operator,
+                    ptrw_enabled=getattr(args, "teacher_ptrw_enabled", False),
+                    ptrw_training_step=global_step,
                     f3a_eta_mode=args.teacher_mode_eta,
                     f3a_energy_ratio_min_vs_raw=args.teacher_energy_ratio_min_vs_raw,
                     f3a_energy_ratio_max_vs_raw=args.teacher_energy_ratio_max_vs_raw,
