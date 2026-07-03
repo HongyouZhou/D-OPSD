@@ -34,6 +34,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from efficient_fewstep.diagnostics import DopsdDiagnosticsConfig, DopsdDiagnosticsRecorder
+from efficient_fewstep.diagnostics.ptrw_full_lora_gradient_smoke import (
+    build_full_lora_smoke_payload,
+    write_payload as write_ptrw_full_lora_smoke_payload,
+)
 from efficient_fewstep.targets import (
     F3A_MODE,
     F3B_MODE,
@@ -523,6 +527,7 @@ def main(args):
     gen_model, optimizer_gen, test_dataloader = accelerator.prepare(
         gen_model, optimizer_gen, test_dataloader
     )
+    gen_model_trainable_parameters = list(filter(lambda p: p.requires_grad, gen_model.parameters()))
 
     global_step = 0
     epoch_start = -1
@@ -711,47 +716,49 @@ def main(args):
 
     ############################################### Train Loop ######################################################
 
-    # get sample prompts, free to change
-    test_prompts, gt_image_paths = next(iter(test_dataloader))
-    test_images_gt = []
-    for image_path in gt_image_paths:
-        with Image.open(image_path) as img:
-            test_images_gt.append(img.convert("RGB"))
+    smoke_only = getattr(args, "teacher_ptrw_full_lora_gradient_smoke_only", False)
+    if not smoke_only:
+        # get sample prompts, free to change
+        test_prompts, gt_image_paths = next(iter(test_dataloader))
+        test_images_gt = []
+        for image_path in gt_image_paths:
+            with Image.open(image_path) as img:
+                test_images_gt.append(img.convert("RGB"))
 
-    with torch.no_grad():
-        generator_test = create_generator(test_prompts, 2026)
-        # sample multistep images for comparison
-        pipeline.vae.to(accelerator.device, dtype=inference_dtype)
-        with accelerator.autocast():
-            with pipeline.transformer.disable_adapter() if args.use_lora > 1 else torch.no_grad():
-                images = pipeline(
-                    prompt=test_prompts,
-                    height=test_h,
-                    width=test_w,
-                    num_inference_steps=9  if args.num_training_steps < 10 else 50, # This actually results in 8 DiT forwards when set to 9
-                    guidance_scale=0.0 if args.num_training_steps < 10 else 4.0,
-                    generator=generator_test,
-                    output_type="pt",
-                )[0]
+        with torch.no_grad():
+            generator_test = create_generator(test_prompts, 2026)
+            # sample multistep images for comparison
+            pipeline.vae.to(accelerator.device, dtype=inference_dtype)
+            with accelerator.autocast():
+                with pipeline.transformer.disable_adapter() if args.use_lora > 1 else torch.no_grad():
+                    images = pipeline(
+                        prompt=test_prompts,
+                        height=test_h,
+                        width=test_w,
+                        num_inference_steps=9  if args.num_training_steps < 10 else 50, # This actually results in 8 DiT forwards when set to 9
+                        guidance_scale=0.0 if args.num_training_steps < 10 else 4.0,
+                        generator=generator_test,
+                        output_type="pt",
+                    )[0]
 
-        # resize to 1/2 resolution according to its original size
-        images = torch.nn.functional.interpolate(images, size=(test_h // 2, test_w // 2), mode='bicubic',
-                                                 align_corners=False)
+            # resize to 1/2 resolution according to its original size
+            images = torch.nn.functional.interpolate(images, size=(test_h // 2, test_w // 2), mode='bicubic',
+                                                     align_corners=False)
 
-        # Save images locally
-        accelerator.wait_for_everyone()
-        out_samples = accelerator.gather(images.to(torch.float32))
+            # Save images locally
+            accelerator.wait_for_everyone()
+            out_samples = accelerator.gather(images.to(torch.float32))
 
-        pipeline.vae.to(accelerator.device, dtype=vae_dtype)
+            pipeline.vae.to(accelerator.device, dtype=vae_dtype)
 
-        # Save as grid images
-        out_samples = Image.fromarray(array2grid(out_samples))
-        if accelerator.is_main_process:
-            base_dir = os.path.join(args.output_dir, args.exp_name)
-            sample_dir = os.path.join(base_dir, "samples")
-            os.makedirs(sample_dir, exist_ok=True)
-            out_samples.save(f"{sample_dir}/samples_original.png")
-            logger.info(f"Saved original sample images to {sample_dir}/samples_original.png")
+            # Save as grid images
+            out_samples = Image.fromarray(array2grid(out_samples))
+            if accelerator.is_main_process:
+                base_dir = os.path.join(args.output_dir, args.exp_name)
+                sample_dir = os.path.join(base_dir, "samples")
+                os.makedirs(sample_dir, exist_ok=True)
+                out_samples.save(f"{sample_dir}/samples_original.png")
+                logger.info(f"Saved original sample images to {sample_dir}/samples_original.png")
 
     grad_norm = 0
     for epoch in range(epoch_start + 1, args.epochs):
@@ -985,6 +992,38 @@ def main(args):
 
                 if not field_loss_records:
                     raise ValueError("No teacher timesteps were selected for D-OPSD loss")
+
+                if getattr(args, "teacher_ptrw_full_lora_gradient_smoke_only", False):
+                    smoke_output = getattr(args, "teacher_ptrw_full_lora_gradient_smoke_output", None)
+                    if not smoke_output:
+                        smoke_output = os.path.join(
+                            save_dir,
+                            "diagnostics",
+                            "ptrw_full_lora_gradient_smoke.json",
+                        )
+
+                    smoke_payload = build_full_lora_smoke_payload(
+                        [record["field_student"] for record in field_loss_records],
+                        [record["field_teacher"] for record in field_loss_records],
+                        parameters=gen_model_trainable_parameters,
+                        alpha_values=getattr(
+                            args,
+                            "teacher_ptrw_full_lora_gradient_smoke_alpha_values",
+                            (0.25, 0.50, 1.00),
+                        ),
+                        case_id=args.teacher_cache_case_id or args.exp_name,
+                        process_count=accelerator.num_processes,
+                    )
+                    if accelerator.is_main_process:
+                        write_ptrw_full_lora_smoke_payload(smoke_output, smoke_payload)
+                        logger.info(
+                            "PTRW full-LoRA gradient smoke completed: "
+                            f"{smoke_payload['status']} -> {smoke_output}"
+                        )
+                    accelerator.wait_for_everyone()
+                    diagnostics.close()
+                    accelerator.end_training()
+                    return
 
                 field_targets, field_target_stats = condition_teacher_targets(
                     [record["field_student"] for record in field_loss_records],
