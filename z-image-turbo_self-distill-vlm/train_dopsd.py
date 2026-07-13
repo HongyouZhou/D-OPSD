@@ -51,6 +51,9 @@ from efficient_fewstep.targets import (
 
 logger = get_logger(__name__)
 
+# Project wrappers may install a provider without changing the baseline path.
+TEACHER_CONTEXT_PROVIDER_FACTORY = None
+
 
 def array2grid(x):
     n_images = x.size(0)
@@ -450,6 +453,18 @@ def main(args):
     train_jsonl_path = resolve_existing_path(args.data_path_train_jsonl, dataset_root)
     test_jsonl_path = resolve_existing_path(args.data_path_test_jsonl, dataset_root)
 
+    teacher_context_provider = None
+    if TEACHER_CONTEXT_PROVIDER_FACTORY is not None:
+        teacher_context_provider = TEACHER_CONTEXT_PROVIDER_FACTORY(
+            dataset_jsonl=train_jsonl_path,
+            vl_model=vl_model,
+            processor=processor,
+            device=accelerator.device,
+            dtype=inference_dtype,
+            output_dir=save_dir,
+            is_main_process=accelerator.is_main_process,
+        )
+
     if '1024x1024 ( 1:1 index_0 )' in select_ratio:
         test_h, test_w = 1024, 1024
     else:
@@ -795,18 +810,20 @@ def main(args):
                             max_sequence_length=512,
                             device=accelerator.device,
                         )
-                        prompt_embeds_list_vl = get_qwen3vl_zimage_prompt_embeds(
-                            vl_model=vl_model,
-                            processor=processor,
-                            prompts=prompts,
-                            images=images_vl,
-                            device=accelerator.device,
-                            dtype=inference_dtype,
-                            max_sequence_length=1024,
-                            num_images_per_prompt=1,
-                             hidden_state_layer=-2,
-                            use_system_prompt=False,
-                        )
+                        prompt_embeds_list_vl = None
+                        if teacher_context_provider is None:
+                            prompt_embeds_list_vl = get_qwen3vl_zimage_prompt_embeds(
+                                vl_model=vl_model,
+                                processor=processor,
+                                prompts=prompts,
+                                images=images_vl,
+                                device=accelerator.device,
+                                dtype=inference_dtype,
+                                max_sequence_length=1024,
+                                num_images_per_prompt=1,
+                                 hidden_state_layer=-2,
+                                use_system_prompt=False,
+                            )
 
                         images = pipeline.vae.encode(images).latent_dist.mode()
                         images = (images - pipeline.vae.config.shift_factor) * pipeline.vae.config.scaling_factor
@@ -882,10 +899,18 @@ def main(args):
                         with torch.no_grad():
                             with accelerator.autocast():
                                 gen_model.set_adapter("teacher")
+                                teacher_prompt_embeds = prompt_embeds_list_vl
+                                if teacher_context_provider is not None:
+                                    teacher_prompt_embeds = teacher_context_provider.context_embeddings(
+                                        prompts=prompts,
+                                        optimizer_step=optimizer_step,
+                                        timestep_index=back_step,
+                                        source_row_ids=batch.get("source_row_ids"),
+                                    )
                                 v_pred_teacher = gen_model(
                                     latents_student_list,
                                     t,
-                                    prompt_embeds_list_vl,
+                                    teacher_prompt_embeds,
                                     return_dict=False,
                                 )[0]
                                 v_pred_teacher = torch.stack(v_pred_teacher, dim=0).squeeze(2)
@@ -1290,6 +1315,8 @@ def main(args):
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         logger.info("Training completed.")
+    if teacher_context_provider is not None:
+        teacher_context_provider.close()
     diagnostics.close()
     accelerator.end_training()
 
