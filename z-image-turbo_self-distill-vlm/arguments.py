@@ -19,6 +19,12 @@ def parse_args():
 
     parser.add_argument("--exp-name", type=str, required=True)
     parser.add_argument("--sample-steps", type=int, default=2000)
+    parser.add_argument(
+        "--disable-training-samples",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Disable the baseline preview generations; protocol eval may run separately in the same task.",
+    )
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--checkpoint-steps", type=int, default=200000)
     parser.add_argument("--max-train-steps", type=int, default=200000)

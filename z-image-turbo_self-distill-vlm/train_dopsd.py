@@ -51,6 +51,11 @@ from efficient_fewstep.targets import (
 
 logger = get_logger(__name__)
 
+# Project wrappers may install these extension points without changing the
+# baseline loss, optimizer, EMA, or checkpoint implementation.
+TEACHER_CONTEXT_PROVIDER_FACTORY = None
+INITIAL_LORA_STATE_LOADER = None
+
 
 def array2grid(x):
     n_images = x.size(0)
@@ -349,6 +354,7 @@ def main(args):
     )
     vl_model.requires_grad_(False)
     vl_model.to(accelerator.device, dtype=inference_dtype)
+    vl_model.eval()
 
     if accelerator.is_main_process:
         logger.info(f"Teacher VLM loaded: {vl_model_name}, dtype: {vl_model.parameters().__next__().dtype}")
@@ -380,6 +386,8 @@ def main(args):
             old_adapter_name="teacher",
             old_init_from_current=True,
         )
+        if INITIAL_LORA_STATE_LOADER is not None:
+            INITIAL_LORA_STATE_LOADER(pipeline.transformer)
 
     # we use ema in full-finetune
     else:
@@ -449,6 +457,18 @@ def main(args):
     dataset_root = Path(__file__).resolve().parent
     train_jsonl_path = resolve_existing_path(args.data_path_train_jsonl, dataset_root)
     test_jsonl_path = resolve_existing_path(args.data_path_test_jsonl, dataset_root)
+
+    teacher_context_provider = None
+    if TEACHER_CONTEXT_PROVIDER_FACTORY is not None:
+        teacher_context_provider = TEACHER_CONTEXT_PROVIDER_FACTORY(
+            dataset_jsonl=train_jsonl_path,
+            vl_model=vl_model,
+            processor=processor,
+            device=accelerator.device,
+            dtype=inference_dtype,
+            output_dir=save_dir,
+            is_main_process=accelerator.is_main_process,
+        )
 
     if '1024x1024 ( 1:1 index_0 )' in select_ratio:
         test_h, test_w = 1024, 1024
@@ -717,7 +737,7 @@ def main(args):
     ############################################### Train Loop ######################################################
 
     smoke_only = getattr(args, "teacher_ptrw_full_lora_gradient_smoke_only", False)
-    if not smoke_only:
+    if not smoke_only and not args.disable_training_samples:
         # get sample prompts, free to change
         test_prompts, gt_image_paths = next(iter(test_dataloader))
         test_images_gt = []
@@ -761,6 +781,8 @@ def main(args):
                 logger.info(f"Saved original sample images to {sample_dir}/samples_original.png")
 
     grad_norm = 0
+    logs = {}
+    micro_batch_index = 0
     for epoch in range(epoch_start + 1, args.epochs):
         for batch in train_dataloader:
 
@@ -768,6 +790,10 @@ def main(args):
                 args.sample_steps = 500
 
             with accelerator.accumulate(gen_model):
+
+                gradient_accumulation_microstep = (
+                    micro_batch_index % int(args.gradient_accumulation_steps)
+                )
 
 
                 images = batch["pixel_values"].to(device=accelerator.device, dtype=vae_dtype)
@@ -795,18 +821,20 @@ def main(args):
                             max_sequence_length=512,
                             device=accelerator.device,
                         )
-                        prompt_embeds_list_vl = get_qwen3vl_zimage_prompt_embeds(
-                            vl_model=vl_model,
-                            processor=processor,
-                            prompts=prompts,
-                            images=images_vl,
-                            device=accelerator.device,
-                            dtype=inference_dtype,
-                            max_sequence_length=1024,
-                            num_images_per_prompt=1,
-                             hidden_state_layer=-2,
-                            use_system_prompt=False,
-                        )
+                        prompt_embeds_list_vl = None
+                        if teacher_context_provider is None:
+                            prompt_embeds_list_vl = get_qwen3vl_zimage_prompt_embeds(
+                                vl_model=vl_model,
+                                processor=processor,
+                                prompts=prompts,
+                                images=images_vl,
+                                device=accelerator.device,
+                                dtype=inference_dtype,
+                                max_sequence_length=1024,
+                                num_images_per_prompt=1,
+                                 hidden_state_layer=-2,
+                                use_system_prompt=False,
+                            )
 
                         images = pipeline.vae.encode(images).latent_dist.mode()
                         images = (images - pipeline.vae.config.shift_factor) * pipeline.vae.config.scaling_factor
@@ -882,10 +910,21 @@ def main(args):
                         with torch.no_grad():
                             with accelerator.autocast():
                                 gen_model.set_adapter("teacher")
+                                teacher_prompt_embeds = prompt_embeds_list_vl
+                                if teacher_context_provider is not None:
+                                    teacher_prompt_embeds = teacher_context_provider.context_embeddings(
+                                        prompts=prompts,
+                                        optimizer_step=optimizer_step,
+                                        gradient_accumulation_microstep=(
+                                            gradient_accumulation_microstep
+                                        ),
+                                        timestep_index=back_step,
+                                        source_row_ids=batch.get("source_row_ids"),
+                                    )
                                 v_pred_teacher = gen_model(
                                     latents_student_list,
                                     t,
-                                    prompt_embeds_list_vl,
+                                    teacher_prompt_embeds,
                                     return_dict=False,
                                 )[0]
                                 v_pred_teacher = torch.stack(v_pred_teacher, dim=0).squeeze(2)
@@ -986,7 +1025,12 @@ def main(args):
                         }
                     )
 
-                    if selected_for_loss and accelerator.sync_gradients and ((global_step + 1) % args.sample_steps == 0):
+                    if (
+                        not args.disable_training_samples
+                        and selected_for_loss
+                        and accelerator.sync_gradients
+                        and ((global_step + 1) % args.sample_steps == 0)
+                    ):
                         student_x0_traj.append(x_0_student.detach())
                         teacher_x0_traj.append(x_0_teacher.detach())
 
@@ -1200,7 +1244,10 @@ def main(args):
                                 logger.info(f"Saved model checkpoint to {checkpoint_dir} at step {global_step}")
 
                     # visualize samples
-                    if global_step % args.sample_steps == 0 or global_step == args.max_train_steps:
+                    if (
+                        not args.disable_training_samples
+                        and (global_step % args.sample_steps == 0 or global_step == args.max_train_steps)
+                    ):
                         with torch.no_grad():
                             pipeline.vae.to(accelerator.device, dtype=inference_dtype)
 
@@ -1278,7 +1325,9 @@ def main(args):
                                 logger.info(f"Saved sample images to {sample_dir}/samples_step_{global_step}.png")
 
                             pipeline.vae.to(accelerator.device, dtype=vae_dtype)
-            progress_bar.set_postfix(**logs)
+            if logs:
+                progress_bar.set_postfix(**logs)
+            micro_batch_index += 1
 
             ############################################### End Train Loop ######################################################
 
@@ -1290,6 +1339,8 @@ def main(args):
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         logger.info("Training completed.")
+    if teacher_context_provider is not None:
+        teacher_context_provider.close()
     diagnostics.close()
     accelerator.end_training()
 
