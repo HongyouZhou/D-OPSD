@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -24,7 +25,7 @@ def _first_path(value: Any) -> str:
 
 
 def resolve_image_path(image_path: str, jsonl_path: str | Path | None = None, data_root: str | Path | None = None) -> Path:
-    path = Path(image_path).expanduser()
+    path = Path(os.path.expandvars(image_path)).expanduser()
     if path.is_absolute():
         return path.resolve()
 
@@ -67,7 +68,7 @@ def get_local_image_path(
 
 
 def resolve_existing_path(path: str | Path, base_dir: str | Path = PROJECT_ROOT) -> Path:
-    resolved_path = Path(path).expanduser()
+    resolved_path = Path(os.path.expandvars(str(path))).expanduser()
     if resolved_path.is_absolute() or resolved_path.exists():
         return resolved_path.resolve()
 

@@ -22,6 +22,7 @@ import math
 from torchvision.utils import make_grid
 from dataset import TextImageDataset, AspectBatchSampler, CustomDataLoader, parse_ratios
 from dataset_validate import TextPromptDataset
+from dopsd_extension import DopsdExtensionContext, DopsdTrainingExtension
 from local_paths import resolve_existing_path
 from PIL import Image
 from arguments import parse_args
@@ -36,12 +37,6 @@ if str(PROJECT_ROOT) not in sys.path:
 from efficient_fewstep.diagnostics import DopsdDiagnosticsConfig, DopsdDiagnosticsRecorder
 
 logger = get_logger(__name__)
-
-# Project wrappers may install these extension points without changing the
-# baseline loss, optimizer, EMA, or checkpoint implementation.
-TEACHER_CONTEXT_PROVIDER_FACTORY = None
-INITIAL_LORA_STATE_LOADER = None
-
 
 def array2grid(x):
     n_images = x.size(0)
@@ -257,7 +252,8 @@ def save_student_teacher_trajectory(pipeline, student_x0_traj, teacher_x0_traj, 
 #                                  Training Loop                                #
 #################################################################################
 
-def main(args):
+def run_training(args, extension=None):
+    extension = extension or DopsdTrainingExtension()
     # set accelerator
     logging_dir = Path(args.output_dir, args.logging_dir)
     accelerator_project_config = ProjectConfiguration(
@@ -372,8 +368,7 @@ def main(args):
             old_adapter_name="teacher",
             old_init_from_current=True,
         )
-        if INITIAL_LORA_STATE_LOADER is not None:
-            INITIAL_LORA_STATE_LOADER(pipeline.transformer)
+        extension.initialize_adapter_state(pipeline.transformer)
 
     # we use ema in full-finetune
     else:
@@ -444,9 +439,8 @@ def main(args):
     train_jsonl_path = resolve_existing_path(args.data_path_train_jsonl, dataset_root)
     test_jsonl_path = resolve_existing_path(args.data_path_test_jsonl, dataset_root)
 
-    teacher_context_provider = None
-    if TEACHER_CONTEXT_PROVIDER_FACTORY is not None:
-        teacher_context_provider = TEACHER_CONTEXT_PROVIDER_FACTORY(
+    teacher_context_provider = extension.build_teacher_context(
+        DopsdExtensionContext(
             dataset_jsonl=train_jsonl_path,
             vl_model=vl_model,
             processor=processor,
@@ -454,7 +448,9 @@ def main(args):
             dtype=inference_dtype,
             output_dir=save_dir,
             is_main_process=accelerator.is_main_process,
+            embedding_fn=get_qwen3vl_zimage_prompt_embeds,
         )
+    )
 
     if '1024x1024 ( 1:1 index_0 )' in select_ratio:
         test_h, test_w = 1024, 1024
@@ -662,6 +658,10 @@ def main(args):
                 images = batch["pixel_values"].to(device=accelerator.device, dtype=vae_dtype)
                 train_dtype = inference_dtype
                 prompts = batch["prompts"]
+                extension.validate_student_prompts(
+                    prompts,
+                    batch.get("source_row_ids"),
+                )
 
 
                 images_vl = (images + 1) / 2
@@ -1079,6 +1079,10 @@ def main(args):
         teacher_context_provider.close()
     diagnostics.close()
     accelerator.end_training()
+
+
+def main(args):
+    run_training(args)
 
 
 if __name__ == "__main__":
