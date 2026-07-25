@@ -34,20 +34,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from efficient_fewstep.diagnostics import DopsdDiagnosticsConfig, DopsdDiagnosticsRecorder
-from efficient_fewstep.diagnostics.ptrw_full_lora_gradient_smoke import (
-    build_full_lora_smoke_payload,
-    write_payload as write_ptrw_full_lora_smoke_payload,
-)
-from efficient_fewstep.targets import (
-    F3A_MODE,
-    F3B_MODE,
-    F3BResidualBank,
-    PC1_MODE,
-    PC1_SOURCE_RESOLVER_BASE_TEXT,
-    ResidualEmaCache,
-    VCEMA_RESIDUAL_MODE,
-    condition_teacher_targets,
-)
 
 logger = get_logger(__name__)
 
@@ -547,7 +533,6 @@ def main(args):
     gen_model, optimizer_gen, test_dataloader = accelerator.prepare(
         gen_model, optimizer_gen, test_dataloader
     )
-    gen_model_trainable_parameters = list(filter(lambda p: p.requires_grad, gen_model.parameters()))
 
     global_step = 0
     epoch_start = -1
@@ -556,98 +541,10 @@ def main(args):
     if accelerator.is_main_process:
         logger.info(f"Starting training experiment: {args.exp_name}")
 
+    if args.teacher_target_mode != "raw":
+        raise ValueError("D-OPSD supports only the raw teacher target")
     if args.teacher_target_domain not in {"x0", "v"}:
-        raise ValueError(f"F1 teacher target conditioning supports x0 and v domains, got {args.teacher_target_domain}")
-    if args.teacher_target_mode == "residual_norm_cap" and args.teacher_residual_norm_cap_ratio is None:
-        raise ValueError("--teacher-residual-norm-cap-ratio is required for residual_norm_cap mode")
-    if float(args.teacher_control_energy_lambda) < 0:
-        raise ValueError("--teacher-control-energy-lambda must be non-negative")
-    if float(args.teacher_control_roughness_beta) < 0:
-        raise ValueError("--teacher-control-roughness-beta must be non-negative")
-    if float(args.teacher_control_force_budget_ratio) < 0:
-        raise ValueError("--teacher-control-force-budget-ratio must be non-negative")
-    if float(args.teacher_control_trust_tau_delta) < 0:
-        raise ValueError("--teacher-control-trust-tau-delta must be non-negative")
-    if not -1.0 <= float(args.teacher_control_anchor_cosine_min) <= 1.0:
-        raise ValueError("--teacher-control-anchor-cosine-min must be in [-1, 1]")
-    if not 0.0 <= float(args.teacher_residual_ema_decay) < 1.0:
-        raise ValueError("--teacher-residual-ema-decay must be in [0, 1)")
-    if not 0.0 <= float(args.teacher_residual_innovation_mix) <= 1.0:
-        raise ValueError("--teacher-residual-innovation-mix must be in [0, 1]")
-    if args.teacher_target_mode == VCEMA_RESIDUAL_MODE:
-        if args.teacher_target_domain != "v":
-            raise ValueError("variance_controlled_residual_ema is fixed to teacher_target_domain=v for F2-A")
-        if accelerator.num_processes != 1:
-            raise ValueError("variance_controlled_residual_ema uses a process-local cache and requires num_processes=1")
-    if args.teacher_target_mode == F3A_MODE:
-        if args.teacher_target_domain != "v":
-            raise ValueError("energy_regularized_mode_seeking is fixed to teacher_target_domain=v for F3-A")
-        if float(args.teacher_control_force_budget_ratio) != 1.0:
-            raise ValueError("F3-A requires teacher_control_force_budget_ratio=1.0; 0.75 is readout-only")
-        if float(args.teacher_mode_eta) < 0:
-            raise ValueError("--teacher-mode-eta must be non-negative")
-        if float(args.teacher_energy_ratio_min_vs_raw) < 0:
-            raise ValueError("--teacher-energy-ratio-min-vs-raw must be non-negative")
-        if float(args.teacher_energy_ratio_max_vs_raw) < float(args.teacher_energy_ratio_min_vs_raw):
-            raise ValueError("--teacher-energy-ratio-max-vs-raw must be >= --teacher-energy-ratio-min-vs-raw")
-        if int(args.teacher_mode_min_batch) < 1:
-            raise ValueError("--teacher-mode-min-batch must be at least 1")
-        if not -1.0 <= float(args.teacher_mode_cosine_floor) <= 1.0:
-            raise ValueError("--teacher-mode-cosine-floor must be in [-1, 1]")
-        if float(args.teacher_matched_force_reference_ratio) <= 0:
-            raise ValueError("--teacher-matched-force-reference-ratio must be positive")
-        if float(args.teacher_mode_residual_norm_eps) <= 0:
-            raise ValueError("--teacher-mode-residual-norm-eps must be positive")
-    if args.teacher_target_mode == F3B_MODE:
-        if args.teacher_target_domain != "v":
-            raise ValueError("safe_angle_temporal_consensus is fixed to teacher_target_domain=v for F3-B")
-        if accelerator.num_processes != 1:
-            raise ValueError("safe_angle_temporal_consensus uses a process-local bank and requires num_processes=1")
-        if float(args.teacher_f3b_eta_mode) < 0:
-            raise ValueError("--teacher-f3b-eta-mode must be non-negative")
-        if not -1.0 <= float(args.teacher_f3b_raw_cosine_min) <= 1.0:
-            raise ValueError("--teacher-f3b-raw-cosine-min must be in [-1, 1]")
-        if float(args.teacher_f3b_temporal_smooth_lambda) < 0:
-            raise ValueError("--teacher-f3b-temporal-smooth-lambda must be non-negative")
-        if float(args.teacher_f3b_energy_ratio_max_vs_raw) < 0:
-            raise ValueError("--teacher-f3b-energy-ratio-max-vs-raw must be non-negative")
-        if int(args.teacher_f3b_bank_size_per_timestep) < 1:
-            raise ValueError("--teacher-f3b-bank-size-per-timestep must be at least 1")
-        if int(args.teacher_f3b_min_consensus_samples) < 1:
-            raise ValueError("--teacher-f3b-min-consensus-samples must be at least 1")
-        if not -1.0 <= float(args.teacher_f3b_bank_cosine_floor) <= 1.0:
-            raise ValueError("--teacher-f3b-bank-cosine-floor must be in [-1, 1]")
-        if float(args.teacher_f3b_matched_force_reference_ratio) <= 0:
-            raise ValueError("--teacher-f3b-matched-force-reference-ratio must be positive")
-        if float(args.teacher_f3b_residual_norm_eps) <= 0:
-            raise ValueError("--teacher-f3b-residual-norm-eps must be positive")
-        if str(args.teacher_f3b_consensus_estimator) not in {"mean", "top_agreement_trimmed"}:
-            raise ValueError(
-                "--teacher-f3b-consensus-estimator must be mean or top_agreement_trimmed"
-            )
-        active_back_steps = str(args.teacher_f3b_consensus_active_back_steps).strip().lower()
-        if active_back_steps not in {"", "all"}:
-            try:
-                parsed_active_back_steps = [
-                    int(part.strip()) for part in active_back_steps.split(",") if part.strip()
-                ]
-            except ValueError as exc:
-                raise ValueError(
-                    "--teacher-f3b-consensus-active-back-steps must be 'all' or comma-separated integers"
-                ) from exc
-            if not parsed_active_back_steps or any(step < 0 for step in parsed_active_back_steps):
-                raise ValueError(
-                    "--teacher-f3b-consensus-active-back-steps must be 'all' or non-negative integers"
-                )
-    if args.teacher_target_mode == PC1_MODE:
-        if args.teacher_target_domain != "v":
-            raise ValueError("paired_lowenergy_control is fixed to teacher_target_domain=v for PC1-A")
-        if str(args.teacher_pc1_source_resolver) != PC1_SOURCE_RESOLVER_BASE_TEXT:
-            raise ValueError(
-                f"unsupported --teacher-pc1-source-resolver: {args.teacher_pc1_source_resolver}"
-            )
-        if str(args.teacher_pc1_b_operator) != "identity_v_domain":
-            raise ValueError(f"unsupported --teacher-pc1-b-operator: {args.teacher_pc1_b_operator}")
+        raise ValueError("teacher target domain must be x0 or v")
 
     teacher_timestep_indices = parse_teacher_timestep_indices(
         args.teacher_timestep_indices,
@@ -672,37 +569,11 @@ def main(args):
             f"{','.join(f'{timestep:g}' for timestep in training_timesteps)}"
         )
         logger.info(
-            "Teacher target conditioning: "
+            "Teacher target: "
             f"variant={args.teacher_target_variant} "
             f"mode={args.teacher_target_mode} "
             f"domain={args.teacher_target_domain} "
-            f"gamma={args.teacher_target_gamma} "
-            f"norm_cap_ratio={args.teacher_residual_norm_cap_ratio} "
-            f"control_energy_lambda={args.teacher_control_energy_lambda} "
-            f"control_roughness_beta={args.teacher_control_roughness_beta} "
-            f"control_force_budget_ratio={args.teacher_control_force_budget_ratio} "
-            f"trust_tau_delta={args.teacher_control_trust_tau_delta} "
-            f"anchor_cosine_min={args.teacher_control_anchor_cosine_min} "
-            f"residual_ema_decay={args.teacher_residual_ema_decay} "
-            f"residual_innovation_mix={args.teacher_residual_innovation_mix} "
-            f"mode_eta={args.teacher_mode_eta} "
-            f"energy_ratio_min_vs_raw={args.teacher_energy_ratio_min_vs_raw} "
-            f"energy_ratio_max_vs_raw={args.teacher_energy_ratio_max_vs_raw} "
-            f"mode_min_batch={args.teacher_mode_min_batch} "
-            f"mode_cosine_floor={args.teacher_mode_cosine_floor} "
-            f"matched_force_reference_ratio={args.teacher_matched_force_reference_ratio} "
-            f"f3b_eta_mode={args.teacher_f3b_eta_mode} "
-            f"f3b_raw_cosine_min={args.teacher_f3b_raw_cosine_min} "
-            f"f3b_temporal_smooth_lambda={args.teacher_f3b_temporal_smooth_lambda} "
-            f"f3b_energy_ratio_max_vs_raw={args.teacher_f3b_energy_ratio_max_vs_raw} "
-            f"f3b_bank_size_per_timestep={args.teacher_f3b_bank_size_per_timestep} "
-            f"f3b_min_consensus_samples={args.teacher_f3b_min_consensus_samples} "
-            f"f3b_bank_cosine_floor={args.teacher_f3b_bank_cosine_floor} "
-            f"f3b_consensus_estimator={args.teacher_f3b_consensus_estimator} "
-            f"f3b_consensus_active_back_steps={args.teacher_f3b_consensus_active_back_steps} "
-            f"pc1_source_resolver={args.teacher_pc1_source_resolver} "
-            f"pc1_b_operator={args.teacher_pc1_b_operator} "
-            f"cache_case_id={args.teacher_cache_case_id or args.exp_name}"
+            f"gamma={args.teacher_target_gamma}"
         )
         if int(args.teacher_timestep_warmup_steps) > 0:
             logger.info(
@@ -719,13 +590,6 @@ def main(args):
                 f"ema={args.teacher_timestep_adaptive_ema}"
             )
 
-    residual_ema_cache = ResidualEmaCache() if args.teacher_target_mode == VCEMA_RESIDUAL_MODE else None
-    residual_consensus_bank = (
-        F3BResidualBank(max_records_per_key=args.teacher_f3b_bank_size_per_timestep)
-        if args.teacher_target_mode == F3B_MODE
-        else None
-    )
-
     progress_bar = tqdm(
         range(0, args.max_train_steps),
         initial=global_step,
@@ -736,8 +600,7 @@ def main(args):
 
     ############################################### Train Loop ######################################################
 
-    smoke_only = getattr(args, "teacher_ptrw_full_lora_gradient_smoke_only", False)
-    if not smoke_only and not args.disable_training_samples:
+    if not args.disable_training_samples:
         # get sample prompts, free to change
         test_prompts, gt_image_paths = next(iter(test_dataloader))
         test_images_gt = []
@@ -899,11 +762,8 @@ def main(args):
 
                     selected_for_loss = back_step in active_loss_indices
                     teacher_forward_ms = None
-                    source_forward_ms = None
                     v_pred_teacher = None
-                    v_pred_source = None
                     x_0_teacher = None
-                    x_0_source = None
                     if selected_for_loss:
                         # teacher
                         teacher_timer = diagnostics.start_timer() if diagnostics_active else None
@@ -935,27 +795,6 @@ def main(args):
                             x_0_teacher = latents_teacher_cur + (1 - t.reshape(bsz, 1, 1, 1)) * v_pred_teacher
                             latents_teacher = latents_teacher_cur + v_pred_teacher * dt.reshape(bsz, 1, 1, 1)
 
-                        if args.teacher_target_mode == PC1_MODE:
-                            source_timer = diagnostics.start_timer() if diagnostics_active else None
-                            with torch.no_grad():
-                                with accelerator.autocast():
-                                    if str(args.teacher_pc1_source_resolver) != PC1_SOURCE_RESOLVER_BASE_TEXT:
-                                        raise ValueError(
-                                            f"unsupported PC1 source resolver: {args.teacher_pc1_source_resolver}"
-                                        )
-                                    with gen_model.disable_adapter():
-                                        v_pred_source = gen_model(
-                                            latents_student_list,
-                                            t,
-                                            prompt_embeds_list,
-                                            return_dict=False,
-                                        )[0]
-                                    v_pred_source = torch.stack(v_pred_source, dim=0).squeeze(2)
-                            source_forward_ms = diagnostics.stop_timer_ms(source_timer) if diagnostics_active else None
-
-                            with torch.no_grad():
-                                x_0_source = latents_student + (1 - t.reshape(bsz, 1, 1, 1)) * v_pred_source
-
                     # student
                     student_timer = diagnostics.start_timer() if diagnostics_active else None
                     with accelerator.autocast():
@@ -973,21 +812,14 @@ def main(args):
                     x_0_student = latents_student_cur + (1 - t.reshape(bsz, 1, 1, 1)) * v_pred_student
                     latents_student = latents_student_cur + v_pred_student * dt.reshape(bsz, 1, 1, 1)
 
-                    # F1 redesign can match either x0 or model-output/v fields.
-                    # Targets are constructed after all selected timesteps are available
-                    # so temporal filters can operate on the ordered residual field.
-
                     loss_dopsd = None
-                    teacher_target_stats = None
                     if selected_for_loss:
                         if args.teacher_target_domain == "x0":
                             field_student = x_0_student
                             field_teacher = x_0_teacher
-                            field_source = x_0_source
                         elif args.teacher_target_domain == "v":
                             field_student = v_pred_student
                             field_teacher = v_pred_teacher
-                            field_source = v_pred_source
                         else:
                             raise ValueError(f"Unknown teacher target domain: {args.teacher_target_domain}")
                         field_loss_records.append(
@@ -995,14 +827,10 @@ def main(args):
                                 "back_step": back_step,
                                 "field_student": field_student,
                                 "field_teacher": field_teacher,
-                                "field_source": field_source,
                                 "x0_student": x_0_student,
                                 "x0_teacher": x_0_teacher,
-                                "x0_source": x_0_source,
                                 "v_pred_student": v_pred_student,
                                 "v_pred_teacher": v_pred_teacher,
-                                "v_pred_source": v_pred_source,
-                                "x0_drift_factor": (1 - t).detach(),
                             }
                         )
 
@@ -1017,11 +845,8 @@ def main(args):
                             "x0_teacher": x_0_teacher.detach() if x_0_teacher is not None else None,
                             "v_pred_student": v_pred_student.detach(),
                             "v_pred_teacher": v_pred_teacher.detach() if v_pred_teacher is not None else None,
-                            "v_pred_source": v_pred_source.detach() if v_pred_source is not None else None,
                             "teacher_forward_ms": teacher_forward_ms,
-                            "source_forward_ms": source_forward_ms,
                             "student_forward_ms": student_forward_ms,
-                            "teacher_target_stats": teacher_target_stats,
                         }
                     )
 
@@ -1037,100 +862,19 @@ def main(args):
                 if not field_loss_records:
                     raise ValueError("No teacher timesteps were selected for D-OPSD loss")
 
-                if getattr(args, "teacher_ptrw_full_lora_gradient_smoke_only", False):
-                    smoke_output = getattr(args, "teacher_ptrw_full_lora_gradient_smoke_output", None)
-                    if not smoke_output:
-                        smoke_output = os.path.join(
-                            save_dir,
-                            "diagnostics",
-                            "ptrw_full_lora_gradient_smoke.json",
-                        )
-
-                    smoke_payload = build_full_lora_smoke_payload(
-                        [record["field_student"] for record in field_loss_records],
-                        [record["field_teacher"] for record in field_loss_records],
-                        parameters=gen_model_trainable_parameters,
-                        alpha_values=getattr(
-                            args,
-                            "teacher_ptrw_full_lora_gradient_smoke_alpha_values",
-                            (0.25, 0.50, 1.00),
-                        ),
-                        case_id=args.teacher_cache_case_id or args.exp_name,
-                        process_count=accelerator.num_processes,
-                    )
-                    if accelerator.is_main_process:
-                        write_ptrw_full_lora_smoke_payload(smoke_output, smoke_payload)
-                        logger.info(
-                            "PTRW full-LoRA gradient smoke completed: "
-                            f"{smoke_payload['status']} -> {smoke_output}"
-                        )
-                    accelerator.wait_for_everyone()
-                    diagnostics.close()
-                    accelerator.end_training()
-                    return
-
-                field_targets, field_target_stats = condition_teacher_targets(
-                    [record["field_student"] for record in field_loss_records],
-                    [record["field_teacher"] for record in field_loss_records],
-                    y_sources=[
-                        record["field_source"] for record in field_loss_records
-                    ] if args.teacher_target_mode == PC1_MODE else None,
-                    mode=args.teacher_target_mode,
-                    gamma=args.teacher_target_gamma,
-                    norm_cap_ratio=args.teacher_residual_norm_cap_ratio,
-                    control_energy_lambda=args.teacher_control_energy_lambda,
-                    control_roughness_beta=args.teacher_control_roughness_beta,
-                    control_force_budget_ratio=args.teacher_control_force_budget_ratio,
-                    control_trust_tau_delta=args.teacher_control_trust_tau_delta,
-                    control_anchor_cosine_min=args.teacher_control_anchor_cosine_min,
-                    control_x0_drift_factors=[
-                        record["x0_drift_factor"] for record in field_loss_records
-                    ],
-                    residual_ema_cache=residual_ema_cache,
-                    residual_ema_decay=args.teacher_residual_ema_decay,
-                    residual_innovation_mix=args.teacher_residual_innovation_mix,
-                    pc1_source_resolver=args.teacher_pc1_source_resolver,
-                    pc1_b_operator=args.teacher_pc1_b_operator,
-                    ptrw_enabled=getattr(args, "teacher_ptrw_enabled", False),
-                    ptrw_training_step=global_step,
-                    f3a_eta_mode=args.teacher_mode_eta,
-                    f3a_energy_ratio_min_vs_raw=args.teacher_energy_ratio_min_vs_raw,
-                    f3a_energy_ratio_max_vs_raw=args.teacher_energy_ratio_max_vs_raw,
-                    f3a_min_mode_batch=args.teacher_mode_min_batch,
-                    f3a_mode_cosine_floor=args.teacher_mode_cosine_floor,
-                    f3a_matched_force_reference_ratio=args.teacher_matched_force_reference_ratio,
-                    f3a_residual_norm_eps=args.teacher_mode_residual_norm_eps,
-                    f3b_eta_mode=args.teacher_f3b_eta_mode,
-                    f3b_raw_cosine_min=args.teacher_f3b_raw_cosine_min,
-                    f3b_temporal_smooth_lambda=args.teacher_f3b_temporal_smooth_lambda,
-                    f3b_energy_ratio_max_vs_raw=args.teacher_f3b_energy_ratio_max_vs_raw,
-                    f3b_bank_size_per_timestep=args.teacher_f3b_bank_size_per_timestep,
-                    f3b_min_consensus_samples=args.teacher_f3b_min_consensus_samples,
-                    f3b_bank_cosine_floor=args.teacher_f3b_bank_cosine_floor,
-                    f3b_matched_force_reference_ratio=args.teacher_f3b_matched_force_reference_ratio,
-                    f3b_residual_norm_eps=args.teacher_f3b_residual_norm_eps,
-                    f3b_consensus_estimator=args.teacher_f3b_consensus_estimator,
-                    f3b_consensus_active_back_steps=args.teacher_f3b_consensus_active_back_steps,
-                    cache_case_id=args.teacher_cache_case_id or args.exp_name,
-                    cache_source_row_ids=batch.get("source_row_ids"),
-                    cache_timestep_indices=[
-                        int(record["back_step"]) for record in field_loss_records
-                    ],
-                    residual_consensus_bank=residual_consensus_bank,
-                )
+                field_targets = [
+                    record["field_teacher"] for record in field_loss_records
+                ]
                 loss_by_back_step = {}
-                stats_by_back_step = {}
-                for record, field_target, teacher_target_stats in zip(
+                for record, field_target in zip(
                     field_loss_records,
                     field_targets,
-                    field_target_stats,
                 ):
                     loss_dopsd = F.mse_loss(record["field_student"], field_target, reduction="mean")
                     total_loss = total_loss + loss_dopsd
                     loss_dopsd_whole.append(loss_dopsd.detach())
                     back_step = record["back_step"]
                     loss_by_back_step[back_step] = loss_dopsd
-                    stats_by_back_step[back_step] = teacher_target_stats
 
                     if args.teacher_timestep_adaptive_metric == "loss_x0":
                         adaptive_metric_value = loss_dopsd.detach()
@@ -1172,19 +916,11 @@ def main(args):
                             v_pred_student=record["v_pred_student"],
                             v_pred_teacher=record["v_pred_teacher"],
                             teacher_forward_ms=record["teacher_forward_ms"],
-                            source_forward_ms=record["source_forward_ms"],
                             student_forward_ms=record["student_forward_ms"],
                             teacher_target_variant=args.teacher_target_variant,
                             teacher_target_mode=args.teacher_target_mode,
                             teacher_target_domain=args.teacher_target_domain,
                             teacher_target_gamma=args.teacher_target_gamma,
-                            teacher_residual_norm_cap_ratio=args.teacher_residual_norm_cap_ratio,
-                            teacher_control_energy_lambda=args.teacher_control_energy_lambda,
-                            teacher_control_roughness_beta=args.teacher_control_roughness_beta,
-                            teacher_control_force_budget_ratio=args.teacher_control_force_budget_ratio,
-                            teacher_control_trust_tau_delta=args.teacher_control_trust_tau_delta,
-                            teacher_control_anchor_cosine_min=args.teacher_control_anchor_cosine_min,
-                            teacher_target_stats=stats_by_back_step.get(back_step),
                         )
 
                 total_loss = total_loss / len(loss_dopsd_whole)

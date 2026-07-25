@@ -98,17 +98,8 @@ def parse_args():
         "--teacher-target-mode",
         type=str,
         default="raw",
-        choices=[
-            "raw",
-            "raw_force075",
-            "trust_region_trajectory_control",
-            "x0_drift_trust_region_trajectory_control",
-            "variance_controlled_residual_ema",
-            "energy_regularized_mode_seeking",
-            "safe_angle_temporal_consensus",
-            "paired_lowenergy_control",
-        ],
-        help="Teacher target conditioning mode for field matching.",
+        choices=["raw"],
+        help="Teacher target used for field matching.",
     )
     parser.add_argument(
         "--teacher-target-domain",
@@ -117,114 +108,12 @@ def parse_args():
         choices=["x0", "v"],
         help="Prediction domain for teacher target conditioning.",
     )
-    parser.add_argument(
-        "--teacher-target-gamma",
-        type=float,
-        default=1.0,
-        help="Residual strength for conditioned teacher targets.",
-    )
-    parser.add_argument(
-        "--teacher-residual-norm-cap-ratio",
-        type=float,
-        default=None,
-        help="Per-batch mean residual norm cap ratio for residual_norm_cap mode.",
-    )
-    parser.add_argument(
-        "--teacher-control-energy-lambda",
-        type=float,
-        default=0.0,
-        help="Energy penalty lambda for trajectory_control teacher targets.",
-    )
-    parser.add_argument(
-        "--teacher-control-roughness-beta",
-        type=float,
-        default=0.0,
-        help="Temporal roughness penalty beta for trajectory_control teacher targets.",
-    )
-    parser.add_argument(
-        "--teacher-control-force-budget-ratio",
-        type=float,
-        default=1.0,
-        help="Mean residual force budget ratio for trust-region teacher targets.",
-    )
-    parser.add_argument(
-        "--teacher-control-trust-tau-delta",
-        type=float,
-        default=0.0,
-        help="Trust-region delta radius relative to the matched-force anchor.",
-    )
-    parser.add_argument(
-        "--teacher-control-anchor-cosine-min",
-        type=float,
-        default=-1.0,
-        help="Minimum cosine similarity between final control and matched-force anchor.",
-    )
-    parser.add_argument(
-        "--teacher-residual-ema-decay",
-        type=float,
-        default=0.9,
-        help="Detached residual cache EMA decay for variance_controlled_residual_ema targets.",
-    )
-    parser.add_argument(
-        "--teacher-residual-innovation-mix",
-        type=float,
-        default=0.5,
-        help="Current residual innovation mix for variance_controlled_residual_ema targets.",
-    )
-    parser.add_argument(
-        "--teacher-cache-case-id",
-        type=str,
-        default=None,
-        help="Stable case id used in variance_controlled_residual_ema cache keys.",
-    )
-    parser.add_argument("--teacher-mode-eta", type=float, default=0.25)
-    parser.add_argument("--teacher-energy-ratio-min-vs-raw", type=float, default=0.90)
-    parser.add_argument("--teacher-energy-ratio-max-vs-raw", type=float, default=1.25)
-    parser.add_argument("--teacher-mode-min-batch", type=int, default=2)
-    parser.add_argument("--teacher-mode-cosine-floor", type=float, default=0.0)
-    parser.add_argument("--teacher-matched-force-reference-ratio", type=float, default=0.75)
-    parser.add_argument("--teacher-mode-residual-norm-eps", type=float, default=1e-6)
-    parser.add_argument("--teacher-f3b-eta-mode", type=float, default=0.25)
-    parser.add_argument("--teacher-f3b-raw-cosine-min", type=float, default=0.90)
-    parser.add_argument("--teacher-f3b-temporal-smooth-lambda", type=float, default=1.0)
-    parser.add_argument("--teacher-f3b-energy-ratio-max-vs-raw", type=float, default=1.0)
-    parser.add_argument("--teacher-f3b-bank-size-per-timestep", type=int, default=8)
-    parser.add_argument("--teacher-f3b-min-consensus-samples", type=int, default=3)
-    parser.add_argument("--teacher-f3b-bank-cosine-floor", type=float, default=0.0)
-    parser.add_argument("--teacher-f3b-matched-force-reference-ratio", type=float, default=0.75)
-    parser.add_argument("--teacher-f3b-residual-norm-eps", type=float, default=1e-6)
-    parser.add_argument(
-        "--teacher-f3b-consensus-estimator",
-        type=str,
-        default="mean",
-        choices=["mean", "top_agreement_trimmed"],
-        help="Consensus estimator for safe_angle_temporal_consensus targets.",
-    )
-    parser.add_argument(
-        "--teacher-f3b-consensus-active-back-steps",
-        type=str,
-        default="all",
-        help="Comma-separated back_step ids where F3-B consensus is active, or 'all'.",
-    )
+    parser.add_argument("--teacher-target-gamma", type=float, default=1.0)
     parser.add_argument(
         "--teacher-target-variant",
         type=str,
         default="raw",
         help="Human-readable teacher target variant name for diagnostics.",
-    )
-    parser.add_argument(
-        "--teacher-pc1-source-resolver",
-        type=str,
-        default="base_text_disabled_adapter",
-        choices=["base_text_disabled_adapter"],
-        help="Source/base field resolver for paired_lowenergy_control.",
-    )
-    parser.add_argument(
-        "--teacher-pc1-b-operator",
-        type=str,
-        default="identity_v_domain",
-        choices=["identity_v_domain"],
-        help="Observable-field mapping B_t for paired_lowenergy_control.",
     )
     parser.add_argument("--ema-decay", type=float, default=0.9, help="EMA decay for teacher model.")
 
