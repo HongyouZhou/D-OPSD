@@ -429,9 +429,8 @@ def run_training(args, extension=None):
         '576x1344 ( 9:21 index_10 )'
     ]
 
-    prompt_keys = ['short_en', 'detailed_en', 'short_zh', 'detailed_zh', 'medium_zh', 'medium_en', "user_prompt_en",
-                   "user_prompt_zh"]
-    test_prompt_keys = ['short_en', 'short_zh', 'medium_zh', 'medium_en', "user_prompt_en", "user_prompt_zh"]
+    prompt_keys = list(extension.student_prompt_keys(evaluation=False))
+    test_prompt_keys = list(extension.student_prompt_keys(evaluation=True))
     select_ratio_index = [j for j in range(len(all_ratios))]
     select_ratio = [all_ratios[i] for i in select_ratio_index]
 

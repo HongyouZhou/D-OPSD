@@ -36,6 +36,27 @@ class DopsdExtensionContext:
 class DopsdTrainingExtension:
     """Default no-op extension used by the upstream D-OPSD CLI."""
 
+    def student_prompt_keys(self, *, evaluation: bool) -> Sequence[str]:
+        if evaluation:
+            return (
+                "short_en",
+                "short_zh",
+                "medium_zh",
+                "medium_en",
+                "user_prompt_en",
+                "user_prompt_zh",
+            )
+        return (
+            "short_en",
+            "detailed_en",
+            "short_zh",
+            "detailed_zh",
+            "medium_zh",
+            "medium_en",
+            "user_prompt_en",
+            "user_prompt_zh",
+        )
+
     def initialize_adapter_state(self, transformer: Any) -> None:
         return None
 
