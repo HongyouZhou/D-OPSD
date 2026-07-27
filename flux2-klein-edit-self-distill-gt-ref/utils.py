@@ -21,7 +21,16 @@ def _encode_prompt(
     device=None,
     max_sequence_length=512,
 ):
-    prompt = [prompt] if isinstance(prompt, str) else prompt
+    # Template a copy. Without list(), the loop below writes the chat-templated
+    # string back into the caller's own list, and the caller here reads that
+    # list again: train_dopsd.py builds the teacher prompt as
+    # f"{p} {edit_sys_prompt}" over `prompts` after this call has returned, so
+    # without the copy the instruction is appended to an already-templated
+    # string and the result is templated a second time -- the teacher is
+    # conditioned on a doubly-nested template instead of on
+    # "<prompt> <instruction>". Encoding is unchanged; the tokenizer still sees
+    # the template, just not through the caller's list.
+    prompt = [prompt] if isinstance(prompt, str) else list(prompt)
 
     for i, prompt_item in enumerate(prompt):
         messages = [
