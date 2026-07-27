@@ -21,7 +21,15 @@ def _encode_prompt(
     device=None,
     max_sequence_length=512,
 ):
-    prompt = [prompt] if isinstance(prompt, str) else prompt
+    # Template a copy. Without list(), the loop below writes the chat-templated
+    # string back into the caller's own list, and every later reader of that
+    # list sees the template instead of the prompt: in this file the teacher
+    # context call receives "<|im_start|>user\n...<|im_end|>\n<|im_start|>
+    # assistant\n" rather than the carrier, and in the flux2 variants the
+    # teacher edit prompt is built by appending to an already-templated string
+    # and then templated a second time. Encoding is unchanged -- the tokenizer
+    # still sees the template, just not through the caller's list.
+    prompt = [prompt] if isinstance(prompt, str) else list(prompt)
 
     for i, prompt_item in enumerate(prompt):
         messages = [
