@@ -36,6 +36,22 @@ class DopsdExtensionContext:
 class DopsdTrainingExtension:
     """Default no-op extension used by the upstream D-OPSD CLI."""
 
+    def teacher_conditioning_mode(self) -> str:
+        """How the teacher receives its prompt embeddings.
+
+        ``multimodal`` is the historical D-OPSD path: load Qwen3-VL and build
+        image-augmented embeddings.  A method may select ``student_text`` to
+        pass the exact same embedding object to teacher and student and avoid
+        loading a visual-language model that it cannot use.
+        """
+
+        return "multimodal"
+
+    def teacher_adapter_update_mode(self) -> str:
+        """How the frozen adapter is updated after an optimizer step."""
+
+        return "ema"
+
     def student_prompt_keys(self, *, evaluation: bool) -> Sequence[str]:
         if evaluation:
             return (
@@ -58,6 +74,17 @@ class DopsdTrainingExtension:
         )
 
     def initialize_adapter_state(self, transformer: Any) -> None:
+        return None
+
+    def validate_teacher_adapter_state(
+        self,
+        transformer: Any,
+        *,
+        optimizer_step: int,
+        event: str,
+    ) -> None:
+        """Validate a method-owned teacher at initialization/checkpoint seams."""
+
         return None
 
     def validate_student_prompts(

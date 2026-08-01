@@ -257,6 +257,14 @@ def save_student_teacher_trajectory(pipeline, student_x0_traj, teacher_x0_traj, 
 
 def run_training(args, extension=None):
     extension = extension or DopsdTrainingExtension()
+    teacher_conditioning_mode = extension.teacher_conditioning_mode()
+    if teacher_conditioning_mode not in {"multimodal", "student_text"}:
+        raise ValueError(
+            "teacher conditioning mode must be multimodal or student_text"
+        )
+    teacher_adapter_update_mode = extension.teacher_adapter_update_mode()
+    if teacher_adapter_update_mode not in {"ema", "frozen"}:
+        raise ValueError("teacher adapter update mode must be ema or frozen")
     # set accelerator
     logging_dir = Path(args.output_dir, args.logging_dir)
     accelerator_project_config = ProjectConfiguration(
@@ -323,26 +331,32 @@ def run_training(args, extension=None):
     tokenizer = pipeline.tokenizer
 
 
-    # get vlm encoder
-    vl_model_name = args.teacher_vlm_model_path
-    min_pixels = 512 * 512
-    max_pixels = 768 * 768
-    from transformers import AutoProcessor, AutoModelForImageTextToText
-    processor = AutoProcessor.from_pretrained(vl_model_name, min_pixels=min_pixels, max_pixels=max_pixels)
-    vl_model = AutoModelForImageTextToText.from_pretrained(
-        vl_model_name,
-    )
-    missing_keys, unexpected_keys = load_matching_state_dict(
-        target_module=vl_model.model.language_model,
-        source_state_dict=pipeline.text_encoder.state_dict(),
-        verbose=False,
-    )
-    vl_model.requires_grad_(False)
-    vl_model.to(accelerator.device, dtype=inference_dtype)
-    vl_model.eval()
+    # The historical path is unchanged.  Text-identical extensions have no
+    # use for Qwen and, importantly, do not pay its memory/load cost.
+    vl_model = None
+    processor = None
+    if teacher_conditioning_mode == "multimodal":
+        vl_model_name = args.teacher_vlm_model_path
+        min_pixels = 512 * 512
+        max_pixels = 768 * 768
+        from transformers import AutoProcessor, AutoModelForImageTextToText
+        processor = AutoProcessor.from_pretrained(vl_model_name, min_pixels=min_pixels, max_pixels=max_pixels)
+        vl_model = AutoModelForImageTextToText.from_pretrained(
+            vl_model_name,
+        )
+        missing_keys, unexpected_keys = load_matching_state_dict(
+            target_module=vl_model.model.language_model,
+            source_state_dict=pipeline.text_encoder.state_dict(),
+            verbose=False,
+        )
+        vl_model.requires_grad_(False)
+        vl_model.to(accelerator.device, dtype=inference_dtype)
+        vl_model.eval()
 
-    if accelerator.is_main_process:
-        logger.info(f"Teacher VLM loaded: {vl_model_name}, dtype: {vl_model.parameters().__next__().dtype}")
+        if accelerator.is_main_process:
+            logger.info(f"Teacher VLM loaded: {vl_model_name}, dtype: {vl_model.parameters().__next__().dtype}")
+    elif accelerator.is_main_process:
+        logger.info("Teacher uses the student's exact text embeddings; Qwen3-VL is not loaded")
 
 
 
@@ -372,6 +386,11 @@ def run_training(args, extension=None):
             old_init_from_current=True,
         )
         extension.initialize_adapter_state(pipeline.transformer)
+        extension.validate_teacher_adapter_state(
+            pipeline.transformer,
+            optimizer_step=0,
+            event="initialized",
+        )
 
     # we use ema in full-finetune
     else:
@@ -453,6 +472,11 @@ def run_training(args, extension=None):
             embedding_fn=get_qwen3vl_zimage_prompt_embeds,
         )
     )
+    if teacher_conditioning_mode == "student_text" and teacher_context_provider is not None:
+        raise ValueError(
+            "student_text conditioning requires the exact student embeddings; "
+            "a separate teacher context provider is not allowed"
+        )
 
     if '1024x1024 ( 1:1 index_0 )' in select_ratio:
         test_h, test_w = 1024, 1024
@@ -687,7 +711,9 @@ def run_training(args, extension=None):
                             device=accelerator.device,
                         )
                         prompt_embeds_list_vl = None
-                        if teacher_context_provider is None:
+                        if teacher_conditioning_mode == "student_text":
+                            prompt_embeds_list_vl = prompt_embeds_list
+                        elif teacher_context_provider is None:
                             prompt_embeds_list_vl = get_qwen3vl_zimage_prompt_embeds(
                                 vl_model=vl_model,
                                 processor=processor,
@@ -773,7 +799,7 @@ def run_training(args, extension=None):
                             with accelerator.autocast():
                                 gen_model.set_adapter("teacher")
                                 teacher_prompt_embeds = prompt_embeds_list_vl
-                                if teacher_context_provider is not None:
+                                if teacher_conditioning_mode == "multimodal" and teacher_context_provider is not None:
                                     teacher_prompt_embeds = teacher_context_provider.context_embeddings(
                                         prompts=prompts,
                                         optimizer_step=optimizer_step,
@@ -957,12 +983,13 @@ def run_training(args, extension=None):
                             total_loss=total_loss.detach(),
                             grad_norm=float(grad_norm) if grad_norm is not None else 0.0,
                         )
-                    ema_update_lora_adapter(
-                        gen_model,
-                        src_adapter="student",
-                        dst_adapter="teacher",
-                        ema_decay=args.ema_decay,
-                    )
+                    if teacher_adapter_update_mode == "ema":
+                        ema_update_lora_adapter(
+                            gen_model,
+                            src_adapter="student",
+                            dst_adapter="teacher",
+                            ema_decay=args.ema_decay,
+                        )
 
                     if accelerator.is_main_process:
                         with open(log_gen, "a") as f_log_gen:
@@ -970,6 +997,11 @@ def run_training(args, extension=None):
 
                     # save model
                     if global_step % args.checkpoint_steps == 0 or global_step == args.max_train_steps:
+                        extension.validate_teacher_adapter_state(
+                            unwrap_model(gen_model, accelerator),
+                            optimizer_step=global_step,
+                            event="checkpoint",
+                        )
                         # save checkpoint
                         if accelerator.is_main_process:
                             if args.use_lora > 1:
