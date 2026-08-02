@@ -952,6 +952,15 @@ def run_training(args, extension=None):
                         )
 
                 total_loss = total_loss / len(loss_dopsd_whole)
+                extension_auxiliary_loss = extension.auxiliary_loss(
+                    gen_model=gen_model,
+                    pipeline=pipeline,
+                    accelerator=accelerator,
+                    optimizer_step=optimizer_step,
+                    micro_step=gradient_accumulation_microstep,
+                )
+                if extension_auxiliary_loss is not None:
+                    total_loss = total_loss + extension_auxiliary_loss
                 backward_timer = diagnostics.start_timer() if diagnostics_active else None
                 accelerator.backward(total_loss)
                 backward_ms = diagnostics.stop_timer_ms(backward_timer) if diagnostics_active else None
@@ -990,6 +999,13 @@ def run_training(args, extension=None):
                             dst_adapter="teacher",
                             ema_decay=args.ema_decay,
                         )
+
+                    extension.on_optimizer_step_end(
+                        gen_model=gen_model,
+                        pipeline=pipeline,
+                        accelerator=accelerator,
+                        optimizer_step=global_step,
+                    )
 
                     if accelerator.is_main_process:
                         with open(log_gen, "a") as f_log_gen:

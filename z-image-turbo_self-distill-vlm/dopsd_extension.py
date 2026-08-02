@@ -99,3 +99,32 @@ class DopsdTrainingExtension:
         context: DopsdExtensionContext,
     ) -> TeacherContextProvider | None:
         return None
+
+    def auxiliary_loss(
+        self,
+        *,
+        gen_model: Any,
+        pipeline: Any,
+        accelerator: Any,
+        optimizer_step: int,
+        micro_step: int,
+    ) -> Any | None:
+        """Optional extra loss term added to the accumulated D-OPSD loss.
+
+        Returning ``None`` (the default) leaves the historical objective
+        byte-identical.
+        """
+
+        return None
+
+    def on_optimizer_step_end(
+        self,
+        *,
+        gen_model: Any,
+        pipeline: Any,
+        accelerator: Any,
+        optimizer_step: int,
+    ) -> None:
+        """Called once per optimizer step, after the EMA update."""
+
+        return None
