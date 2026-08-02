@@ -50,6 +50,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--size-multiple", type=int, default=16)
     parser.add_argument("--base-seed", type=int, default=73483)
     parser.add_argument("--overwrite", action="store_true", help="Overwrite the output JSONL if it exists.")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "Fail on the first prompt or image that does not produce a file, instead of "
+            "logging it and continuing. Without this a run that lost images still exits 0 "
+            "and writes a JSONL whose empty path slots only a downstream reader notices."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -158,6 +167,12 @@ def switch_lora(
             lora_path,
             torch_dtype=dtype,
         ).to(device)
+        # peft upcasts adapter weights to fp32 when it loads them
+        # (autocast_adapter_dtype defaults to True), so without this the LoRA
+        # branch runs its matmuls in fp32 while the rest of the transformer
+        # runs in `dtype` -- two arithmetics inside one forward, and neither of
+        # them the one a training-time collector reproduces.
+        pipe.transformer.to(dtype)
 
     gc.collect()
     if torch.cuda.is_available():
@@ -265,6 +280,10 @@ def run_sampling(args: argparse.Namespace) -> None:
             item_dir.mkdir(parents=True, exist_ok=True)
 
             rewrite_prompt, test_prompts = get_prompt_fields(row)
+            if args.strict and not rewrite_prompt:
+                raise ValueError(f"Sample {sample_id} carries no rewrite prompt")
+            if args.strict and not test_prompts:
+                raise ValueError(f"Sample {sample_id} carries no test prompts")
             if rewrite_prompt:
                 seed = args.base_seed + sample_idx * 100
                 save_path = item_dir / "rewrite.png"
@@ -282,6 +301,10 @@ def run_sampling(args: argparse.Namespace) -> None:
                     image.save(save_path)
                     out_row["rewrite_prompt_en_path"] = path_for_jsonl(save_path, output_dir)
                 except Exception as exc:
+                    if args.strict:
+                        raise RuntimeError(
+                            f"Rewrite generation failed for sample {sample_id}"
+                        ) from exc
                     print(f"[ERROR] Rewrite generation failed for sample {sample_id}: {exc}")
 
             for prompt_index, prompt in enumerate(test_prompts):
@@ -301,6 +324,11 @@ def run_sampling(args: argparse.Namespace) -> None:
                     image.save(save_path)
                     out_row["test_prompts_en_paths"].append(path_for_jsonl(save_path, output_dir))
                 except Exception as exc:
+                    if args.strict:
+                        raise RuntimeError(
+                            f"Test generation failed for sample {sample_id}, "
+                            f"prompt {prompt_index}"
+                        ) from exc
                     print(f"[ERROR] Test generation failed for sample {sample_id}, prompt {prompt_index}: {exc}")
                     out_row["test_prompts_en_paths"].append("")
 

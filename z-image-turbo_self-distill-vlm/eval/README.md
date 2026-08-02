@@ -90,6 +90,17 @@ Use an empty string as a class value to evaluate the base model without LoRA.
 
 --num-inference-steps 9 actually results in 8 DiT forwards
 
+By default a prompt that fails to produce an image is logged and skipped: the
+run still exits 0 and the row records an empty path. Pass `--strict` to stop at
+the first such failure instead, which is what a comparison across checkpoints
+wants — a run that quietly lost images gives each checkpoint a different
+denominator.
+
+The LoRA is cast to `--torch-dtype` after it is loaded. peft holds adapter
+weights in fp32, so without that cast the LoRA branch runs in fp32 inside an
+otherwise-bf16 transformer, and the sampler is not the one a training-time
+collector on the same weights reproduces.
+
 `run_z.py` writes:
 
 - `eval_outputs/dreambooth/dreambooth.jsonl`
