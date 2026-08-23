@@ -2,6 +2,9 @@
     "bf16": {
         "enabled": "auto"
     },
+    "data_types": {
+        "grad_accum_dtype": "fp32"
+    },
     "zero_optimization": {
         "stage": 2,
         "offload_optimizer": {
@@ -9,7 +12,7 @@
             "pin_memory": false
         },
         "allgather_partitions": true,
-        "allgather_bucket_size": 2e8,
+        "allgather_bucket_size": 200000000.0,
         "overlap_comm": false,
         "reduce_scatter": false,
         "reduce_bucket_size": "2432",

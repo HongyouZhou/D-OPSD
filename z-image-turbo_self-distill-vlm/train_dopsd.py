@@ -22,7 +22,13 @@ import math
 from torchvision.utils import make_grid
 from dataset import TextImageDataset, AspectBatchSampler, CustomDataLoader, parse_ratios
 from dataset_validate import TextPromptDataset
-from dopsd_extension import DopsdExtensionContext, DopsdTrainingExtension
+from dopsd_extension import (
+    DStepObserverSession,
+    DopsdExtensionContext,
+    DopsdTrainingExtension,
+    observed_clip_branch,
+    require_d_step_observer,
+)
 from local_paths import resolve_existing_path
 from PIL import Image
 from arguments import parse_args
@@ -257,6 +263,7 @@ def save_student_teacher_trajectory(pipeline, student_x0_traj, teacher_x0_traj, 
 
 def run_training(args, extension=None):
     extension = extension or DopsdTrainingExtension()
+    d_step_observer = require_d_step_observer(extension.d_step_observer())
     teacher_conditioning_mode = extension.teacher_conditioning_mode()
     if teacher_conditioning_mode not in {"multimodal", "student_text"}:
         raise ValueError(
@@ -555,6 +562,19 @@ def run_training(args, extension=None):
     gen_model, optimizer_gen, test_dataloader = accelerator.prepare(
         gen_model, optimizer_gen, test_dataloader
     )
+    extension.prepared_adapter_state(accelerator.unwrap_model(gen_model))
+    d_step_observer_session = (
+        None
+        if d_step_observer is None
+        else DStepObserverSession(
+            d_step_observer,
+            module=gen_model,
+            optimizer=optimizer_gen,
+            accelerator=accelerator,
+            gradient_accumulation_steps=int(args.gradient_accumulation_steps),
+            max_grad_norm=float(args.max_grad_norm),
+        )
+    )
 
     global_step = 0
     epoch_start = -1
@@ -823,6 +843,36 @@ def run_training(args, extension=None):
                             x_0_teacher = latents_teacher_cur + (1 - t.reshape(bsz, 1, 1, 1)) * v_pred_teacher
                             latents_teacher = latents_teacher_cur + v_pred_teacher * dt.reshape(bsz, 1, 1, 1)
 
+                        if d_step_observer_session is not None:
+                            if args.teacher_target_domain == "x0":
+                                stopped_teacher_target = x_0_teacher
+                            elif args.teacher_target_domain == "v":
+                                stopped_teacher_target = v_pred_teacher
+                            else:
+                                raise ValueError(
+                                    f"Unknown teacher target domain: {args.teacher_target_domain}"
+                                )
+                            source_row_ids = batch.get("source_row_ids")
+                            d_step_observer_session.on_stopped_microbatch(
+                                step=optimizer_step,
+                                microbatch=gradient_accumulation_microstep,
+                                coordinate={
+                                    "epoch": epoch,
+                                    "micro_batch_index": micro_batch_index,
+                                    "back_step": back_step,
+                                    "target_domain": args.teacher_target_domain,
+                                    "source_row_ids": (
+                                        ()
+                                        if source_row_ids is None
+                                        else tuple(source_row_ids)
+                                    ),
+                                },
+                                state=latents_student,
+                                tau=t,
+                                student_context=prompt_embeds_list,
+                                teacher_target=stopped_teacher_target,
+                            )
+
                     # student
                     student_timer = diagnostics.start_timer() if diagnostics_active else None
                     with accelerator.autocast():
@@ -952,6 +1002,12 @@ def run_training(args, extension=None):
                         )
 
                 total_loss = total_loss / len(loss_dopsd_whole)
+                if d_step_observer_session is not None:
+                    d_step_observer_session.record_microbatch_loss(
+                        step=optimizer_step,
+                        microbatch=gradient_accumulation_microstep,
+                        loss=total_loss,
+                    )
                 extension_auxiliary_loss = extension.auxiliary_loss(
                     gen_model=gen_model,
                     pipeline=pipeline,
@@ -967,9 +1023,35 @@ def run_training(args, extension=None):
 
                 grad_norm = None
                 if accelerator.sync_gradients:
+                    if (
+                        d_step_observer_session is not None
+                        and not d_step_observer_session.owns_optimizer_step_hooks
+                    ):
+                        unscale_result = accelerator.unscale_gradients(optimizer_gen)
+                        if unscale_result is not None:
+                            raise TypeError(
+                                "canonical D unscale operation must return None"
+                            )
+                        d_step_observer_session.on_pre_clip(step=optimizer_step)
                     grad_norm = accelerator.clip_grad_norm_(gen_model.parameters(), args.max_grad_norm)
+                    if (
+                        d_step_observer_session is not None
+                        and not d_step_observer_session.owns_optimizer_step_hooks
+                    ):
+                        d_step_observer_session.on_post_clip(
+                            step=optimizer_step,
+                            clip_branch=observed_clip_branch(
+                                grad_norm, args.max_grad_norm
+                            ),
+                        )
 
                 optimizer_gen.step()
+                if (
+                    d_step_observer_session is not None
+                    and accelerator.sync_gradients
+                    and not d_step_observer_session.owns_optimizer_step_hooks
+                ):
+                    d_step_observer_session.on_post_optimizer(step=optimizer_step)
                 optimizer_gen.zero_grad(set_to_none=True)
 
                 if accelerator.sync_gradients:
@@ -999,6 +1081,9 @@ def run_training(args, extension=None):
                             dst_adapter="teacher",
                             ema_decay=args.ema_decay,
                         )
+
+                    if d_step_observer_session is not None:
+                        d_step_observer_session.on_post_ema(step=global_step)
 
                     extension.on_optimizer_step_end(
                         gen_model=gen_model,
